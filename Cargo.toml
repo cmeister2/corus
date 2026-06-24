@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
 members = [
-    "chorus-syscall",
-    "chorus-core",
-    "chorus",
+    "corus-syscall",
+    "corus-core",
+    "corus",
 ]
 
 [workspace.package]
@@ -11,7 +11,7 @@ edition = "2024"
 version = "0.0.0-semantic-release"
 rust-version = "1.88"
 license = "BSD-3-Clause"
-repository = "https://github.com/cmeister2/chorus"
+repository = "https://github.com/cmeister2/corus"
 
 # Panicking on the post-suspension dump path must never unwind (the unwinder
 # would touch machinery we cannot safely use while sibling threads are stopped).

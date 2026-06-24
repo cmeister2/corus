@@ -26,9 +26,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build libraries and test binaries
         run: |
-          cargo build -p chorus-syscall --all-targets
-          cargo build -p chorus-core --all-targets
-          cargo build -p chorus
+          cargo build -p corus-syscall --all-targets
+          cargo build -p corus-core --all-targets
+          cargo build -p corus
           cargo test --workspace --no-run
 
   test:

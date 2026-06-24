@@ -9,15 +9,15 @@ fi
 
 version="${1:?usage: $0 [--dry-run] <version>}"
 
-sed -i "s/0.0.0-semantic-release/${version}/g" Cargo.toml chorus-core/Cargo.toml chorus/Cargo.toml
+sed -i "s/0.0.0-semantic-release/${version}/g" Cargo.toml corus-core/Cargo.toml corus/Cargo.toml
 
 cargo generate-lockfile
 
 if [[ "${dry_run}" == true ]]; then
   cargo test --workspace --no-run
-  cargo package -p chorus-syscall --locked --allow-dirty
-  cargo package -p chorus-core --list --allow-dirty >/dev/null
-  cargo package -p chorus --list --allow-dirty >/dev/null
+  cargo package -p corus-syscall --locked --allow-dirty
+  cargo package -p corus-core --list --allow-dirty >/dev/null
+  cargo package -p corus --list --allow-dirty >/dev/null
   echo "publish dry-run complete for ${version}"
   exit 0
 fi
@@ -37,6 +37,6 @@ publish_crate() {
   cargo publish -p "${crate}" --locked --allow-dirty
 }
 
-publish_crate chorus-syscall
-publish_crate chorus-core
-publish_crate chorus
+publish_crate corus-syscall
+publish_crate corus-core
+publish_crate corus
