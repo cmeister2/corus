@@ -1,0 +1,25 @@
+[package]
+name = "chorus-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "no_std ELF core dump engine for chorus."
+keywords = ["coredump", "elf", "linux", "nostd", "debugging"]
+
+[dependencies]
+chorus-syscall = { version = "0.0.0-semantic-release", path = "../chorus-syscall" }
+
+[dev-dependencies]
+# Tests only - for pipe/read/close setup and differential checks. Never linked
+# into the library.
+libc = "0.2"
+
+[lints.rust]
+missing_docs = "deny"
+
+[lints.clippy]
+missing_docs_in_private_items = "deny"
+missing_errors_doc = "deny"
+missing_panics_doc = "deny"

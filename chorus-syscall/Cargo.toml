@@ -1,0 +1,27 @@
+[package]
+name = "chorus-syscall"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "no_std raw Linux syscall wrappers for chorus."
+keywords = ["syscall", "linux", "nostd", "asm", "coredump"]
+
+[lib]
+# Pure no_std library: no allocator, no libc reachable from here.
+
+[dependencies]
+
+[dev-dependencies]
+# libc is used ONLY by tests for differential validation of the asm! wrappers.
+# It must never be linked into the library itself.
+libc = "0.2"
+
+[lints.rust]
+missing_docs = "deny"
+
+[lints.clippy]
+missing_docs_in_private_items = "deny"
+missing_errors_doc = "deny"
+missing_panics_doc = "deny"
