@@ -15,24 +15,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
-name = "chorus"
+name = "corus"
 version = "0.0.0-semantic-release"
 dependencies = [
- "chorus-core",
+ "corus-core",
  "tempfile",
  "which",
 ]
 
 [[package]]
-name = "chorus-core"
+name = "corus-core"
 version = "0.0.0-semantic-release"
 dependencies = [
- "chorus-syscall",
+ "corus-syscall",
  "libc",
 ]
 
 [[package]]
-name = "chorus-syscall"
+name = "corus-syscall"
 version = "0.0.0-semantic-release"
 dependencies = [
  "libc",
