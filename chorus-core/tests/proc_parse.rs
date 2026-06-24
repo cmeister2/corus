@@ -5,15 +5,28 @@
 use chorus_core::notes::{align_note, note_size, nt_file_sizes, write_nt_file, write_prpsinfo};
 use chorus_core::proc_parse::{count_auxv, mapping_buf, parse_self_maps};
 
+/// One reference mapping parsed from the kernel's `/proc/self/maps` text.
+struct ReferenceMap {
+    /// Inclusive start virtual address.
+    start: usize,
+    /// Exclusive end virtual address.
+    end: usize,
+    /// Raw permissions field (`rwxp` or similar).
+    perms: String,
+    /// Mapping path, if present.
+    path: String,
+}
+
 /// Parse a reference line set from the kernel via std, to cross-check our
 /// libc-free parser against the same data.
-fn reference_maps() -> Vec<(usize, usize, String)> {
+fn reference_maps() -> Vec<ReferenceMap> {
     let text = std::fs::read_to_string("/proc/self/maps").unwrap();
     let mut out = Vec::new();
     for line in text.lines() {
         // format: start-end perms offset dev inode path
         let mut parts = line.splitn(6, ' ');
         let range = parts.next().unwrap();
+        let perms = parts.next().unwrap().to_string();
         let mut rr = range.split('-');
         let start = usize::from_str_radix(rr.next().unwrap(), 16).unwrap();
         let end = usize::from_str_radix(rr.next().unwrap(), 16).unwrap();
@@ -23,7 +36,12 @@ fn reference_maps() -> Vec<(usize, usize, String)> {
             .nth(5)
             .map(|s| s.trim_start().to_string())
             .unwrap_or_default();
-        out.push((start, end, path));
+        out.push(ReferenceMap {
+            start,
+            end,
+            perms,
+            path,
+        });
         let _ = &mut parts;
     }
     out
@@ -41,24 +59,32 @@ fn maps_parse_matches_kernel_ranges() {
     assert!(n > 0, "should parse at least one mapping");
     let check = n.min(reference.len()).min(8);
     for i in 0..check {
-        assert_eq!(buf[i].start, reference[i].0, "start mismatch at {i}");
-        assert_eq!(buf[i].end, reference[i].1, "end mismatch at {i}");
+        assert_eq!(buf[i].start, reference[i].start, "start mismatch at {i}");
+        assert_eq!(buf[i].end, reference[i].end, "end mismatch at {i}");
     }
 }
 
 #[test]
 fn maps_parse_flags_and_anon() {
+    let reference = reference_maps();
     let mut buf = mapping_buf();
     let n = parse_self_maps(&mut buf).expect("parse maps");
 
-    // Every executable code mapping must be readable; verify perm decoding is
-    // sane and at least one anonymous and one named mapping exist in a normal
-    // process.
+    // Verify perm decoding against the kernel's raw maps text, and check that
+    // at least one named mapping exists in a normal process. Some kernels can
+    // expose execute-only VMAs, so do not assume x implies r.
     let mut saw_anon = false;
     let mut saw_named = false;
     for m in &buf[..n] {
-        if m.flags.executable() {
-            assert!(m.flags.readable(), "x implies r in practice");
+        if let Some(expected) = reference
+            .iter()
+            .find(|r| r.start == m.start && r.end == m.end)
+        {
+            let perms = expected.perms.as_bytes();
+            assert_eq!(m.flags.readable(), perms.first() == Some(&b'r'));
+            assert_eq!(m.flags.writable(), perms.get(1) == Some(&b'w'));
+            assert_eq!(m.flags.executable(), perms.get(2) == Some(&b'x'));
+            assert_eq!(m.flags.private(), perms.get(3) == Some(&b'p'));
         }
         if m.is_anon {
             saw_anon = true;
@@ -86,8 +112,8 @@ fn named_mappings_have_paths_matching_kernel() {
         .map(|m| core::str::from_utf8(m.path()).unwrap().to_string());
     let theirs = reference
         .iter()
-        .find(|(_, _, p)| !p.is_empty() && p.starts_with('/'))
-        .map(|(_, _, p)| p.clone());
+        .find(|m| !m.path.is_empty() && m.path.starts_with('/'))
+        .map(|m| m.path.clone());
 
     if let (Some(a), Some(b)) = (ours, theirs) {
         assert_eq!(a, b, "first file-backed path should match kernel");

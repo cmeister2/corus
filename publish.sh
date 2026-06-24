@@ -15,9 +15,9 @@ cargo generate-lockfile
 
 if [[ "${dry_run}" == true ]]; then
   cargo test --workspace --no-run
-  cargo package -p chorus-syscall --locked
-  cargo package -p chorus-core --list >/dev/null
-  cargo package -p chorus --list >/dev/null
+  cargo package -p chorus-syscall --locked --allow-dirty
+  cargo package -p chorus-core --list --allow-dirty >/dev/null
+  cargo package -p chorus --list --allow-dirty >/dev/null
   echo "publish dry-run complete for ${version}"
   exit 0
 fi
@@ -27,14 +27,14 @@ publish_crate() {
   local attempt
 
   for attempt in 1 2 3 4 5; do
-    if cargo publish -p "${crate}" --locked; then
+    if cargo publish -p "${crate}" --locked --allow-dirty; then
       return 0
     fi
     echo "cargo publish failed for ${crate}; retrying after crates.io index propagation (${attempt}/5)" >&2
     sleep "$((attempt * 20))"
   done
 
-  cargo publish -p "${crate}" --locked
+  cargo publish -p "${crate}" --locked --allow-dirty
 }
 
 publish_crate chorus-syscall
