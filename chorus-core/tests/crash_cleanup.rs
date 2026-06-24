@@ -8,9 +8,9 @@
 //! worker threads keep making progress (proving they were resumed, not left
 //! stopped).
 
+use chorus_core::threads::{ALT_STACK_SIZE, with_mmap_stack};
 use core::ffi::{c_int, c_void};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use chorus_core::threads::{ALT_STACK_SIZE, with_mmap_stack};
 use std::time::Duration;
 
 static PROGRESS: AtomicU64 = AtomicU64::new(0);

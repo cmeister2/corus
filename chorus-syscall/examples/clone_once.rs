@@ -3,8 +3,8 @@
 //!
 //! The child writes one byte to stdout and exits; the parent waits and exits 0.
 
-use core::ffi::c_void;
 use chorus_syscall::sys;
+use core::ffi::c_void;
 
 /// Share the address space with the child.
 const CLONE_VM: usize = 0x0000_0100;

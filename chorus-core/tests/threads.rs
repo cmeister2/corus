@@ -3,9 +3,9 @@
 //! resumes cleanly - including the deadlock-safety case where a victim thread
 //! holds a libc lock at suspend time.
 
+use chorus_core::threads::with_mmap_stack;
 use core::ffi::{c_int, c_void};
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use chorus_core::threads::with_mmap_stack;
 use std::time::Duration;
 
 // Captured by the callback so the test can inspect what the lister found.

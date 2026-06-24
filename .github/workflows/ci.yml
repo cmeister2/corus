@@ -1,0 +1,137 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: Build libraries and test binaries
+        run: |
+          cargo build -p chorus-syscall --all-targets
+          cargo build -p chorus-core --all-targets
+          cargo build -p chorus
+          cargo test --workspace --no-run
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: Install test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils build-essential elfutils gdb
+      - run: make tests
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+          targets: x86_64-unknown-linux-gnu
+      - run: cargo fmt --all --check
+
+  publish-dry-run:
+    name: Publish dry-run
+    needs: [build, test, clippy, fmt]
+    runs-on: ubuntu-latest
+    if: github.event_name != 'push' || github.ref != 'refs/heads/main'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - run: ./publish.sh --dry-run 0.0.${{ github.run_id }}
+
+  release:
+    name: Release
+    needs: [build, test, clippy, fmt]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: release
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      - name: Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: npx semantic-release
+
+  success:
+    name: Success
+    needs: [build, test, clippy, fmt, publish-dry-run, release]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check required jobs
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          CLIPPY_RESULT: ${{ needs.clippy.result }}
+          FMT_RESULT: ${{ needs.fmt.result }}
+          DRY_RUN_RESULT: ${{ needs.publish-dry-run.result }}
+          RELEASE_RESULT: ${{ needs.release.result }}
+        run: |
+          test "${BUILD_RESULT}" = success
+          test "${TEST_RESULT}" = success
+          test "${CLIPPY_RESULT}" = success
+          test "${FMT_RESULT}" = success
+          case "${DRY_RUN_RESULT}" in success|skipped) ;; *) exit 1 ;; esac
+          case "${RELEASE_RESULT}" in success|skipped) ;; *) exit 1 ;; esac
+          echo "All checks passed"

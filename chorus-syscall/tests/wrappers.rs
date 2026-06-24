@@ -11,8 +11,8 @@
 //!
 //! `libc` is a dev-dependency only - never linked into the library itself.
 
-use core::ffi::c_void;
 use chorus_syscall::sys;
+use core::ffi::c_void;
 
 /// Map our `SysResult` to the libc `(ret, errno)` convention for comparison.
 fn split(r: sys::SysResult) -> (isize, i32) {
