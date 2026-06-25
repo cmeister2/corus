@@ -12,7 +12,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use corus_core::dump::DumpOptions;
+use corus_core::dump::{DumpOptions, DumpStrategy};
 
 /// Error returned by the Rust API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +48,8 @@ pub struct CoreDump {
     max_length: Option<usize>,
     /// Optional compression family.
     compression: Option<Compression>,
+    /// How to freeze the process while writing (defaults to fork-snapshot).
+    strategy: DumpStrategy,
 }
 
 impl CoreDump {
@@ -66,6 +68,17 @@ impl CoreDump {
     /// Compress the core on the fly with the given family.
     pub fn compression(mut self, c: Compression) -> Self {
         self.compression = Some(c);
+        self
+    }
+
+    /// Select how the process is frozen while the core is written.
+    ///
+    /// Defaults to [`DumpStrategy::ForkSnapshot`], which minimizes the pause by
+    /// writing from a copy-on-write `fork` child. Pass
+    /// [`DumpStrategy::InProcessFrozen`] to keep all threads frozen for the whole
+    /// write (strict pre-fork semantics, no `fork`).
+    pub fn strategy(mut self, strategy: DumpStrategy) -> Self {
+        self.strategy = strategy;
         self
     }
 
@@ -99,6 +112,7 @@ impl CoreDump {
                 let opts = DumpOptions {
                     max_length: self.max_length,
                     frame,
+                    strategy: self.strategy,
                     ..Default::default()
                 };
                 unsafe { corus_core::write_core_dump_to_fd_options(fd, &opts) }
@@ -111,6 +125,7 @@ impl CoreDump {
                     let opts = DumpOptions {
                         max_length: self.max_length,
                         frame,
+                        strategy: self.strategy,
                         ..Default::default()
                     };
                     unsafe {
@@ -127,6 +142,7 @@ impl CoreDump {
                     let opts = corus_core::dump::DumpOptions {
                         max_length: self.max_length,
                         frame,
+                        strategy: self.strategy,
                         ..Default::default()
                     };
                     unsafe { corus_core::write_core_dump_to_fd_options(fd, &opts) }
