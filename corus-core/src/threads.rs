@@ -23,7 +23,7 @@
 //! - **Callback**: a C-ABI fn pointer + context pointer rather than varargs.
 
 use core::ffi::{c_int, c_void};
-use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicPtr, AtomicUsize, Ordering};
 use core::{mem, ptr};
 
 use corus_syscall::arch::PAGE_SIZE;
@@ -48,6 +48,20 @@ static SIG_PIDS: AtomicPtr<c_int> = AtomicPtr::new(ptr::null_mut());
 
 /// Number of suspended pids visible to the crash signal handler.
 static SIG_NUM_THREADS: AtomicUsize = AtomicUsize::new(0);
+
+/// Pid of the fork-snapshot child the callback spawned, for the lister to reap.
+///
+/// The fork-snapshot dump path (see `crate::lib`) forks a copy-on-write child
+/// inside the callback so the lister can resume the siblings immediately while
+/// the child writes the core. The callback publishes the child pid here; after
+/// resuming the siblings the lister `wait4`s it (so the child is reaped by its
+/// real parent, before the lister exits) and folds the child's exit status into
+/// the dump result. `0` means "no snapshot child" (in-line write / fork failed).
+///
+/// Lives in shared VM like the other lister statics, so the lister and the
+/// original caller see the same value; the snapshot child gets a private
+/// copy-on-write view it never touches. Same single-dump-at-a-time contract.
+static SNAPSHOT_CHILD: AtomicI32 = AtomicI32::new(0);
 
 /// `SIGABRT` signal number.
 const SIGABRT: c_int = 6;
@@ -434,13 +448,68 @@ extern "C" fn lister_thread(arg: *mut c_void) -> c_int {
     // resume had to do anything - a footgun we drop.)
     clear_crash_state();
     resume_all_process_threads(&pids[..num_threads]);
+
+    // Fork-snapshot path: if the callback forked a copy-on-write child to write
+    // the core (so we could resume the siblings above without waiting for the
+    // whole dump), reap it now - before this lister exits, so the child is
+    // collected by its real parent rather than reparenting and racing the
+    // caller's `wait4`. The child reports success/failure only through its exit
+    // status (its writes to the COW copy of the caller's context do not
+    // propagate back), so we fold that status into `params` here.
+    let child = SNAPSHOT_CHILD.swap(0, Ordering::SeqCst);
+    if child > 0 {
+        reap_snapshot_child(params, child);
+    }
     0
+}
+
+/// Reap the fork-snapshot child and translate its exit status into the dump
+/// result. Sets `params.result`/`params.err` on failure; leaves them as the
+/// callback set them (result 0) on success. A clean `exit(0)` is success;
+/// anything else (non-zero exit or death by signal, e.g. SIGSEGV mid-write) maps
+/// to `EFAULT`, mirroring the lister's own status decode in the caller.
+fn reap_snapshot_child(params: &mut ListerParams, child: c_int) {
+    let mut status: c_int = 0;
+    loop {
+        match unsafe { sys::wait4(child, &mut status, WALL, ptr::null_mut()) } {
+            Ok(_) => break,
+            Err(EINTR) => continue,
+            Err(errno) => {
+                params.result = -1;
+                params.err = errno;
+                return;
+            }
+        }
+    }
+    let ok = (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 0;
+    if !ok {
+        params.result = -1;
+        params.err = EFAULT;
+    }
 }
 
 /// Stop the crash handler from acting on the (about-to-be-resumed) pid list.
 fn clear_crash_state() {
     SIG_PIDS.store(ptr::null_mut(), Ordering::SeqCst);
     SIG_NUM_THREADS.store(0, Ordering::SeqCst);
+}
+
+/// Publish the pid of a fork-snapshot child for the lister to reap after it
+/// resumes the siblings. Called by the dump callback in the fork parent.
+pub fn set_snapshot_child(pid: c_int) {
+    SNAPSHOT_CHILD.store(pid, Ordering::SeqCst);
+}
+
+/// Disarm the inherited crash-cleanup state in a freshly forked snapshot child.
+///
+/// The child inherits the armed `SIG_PIDS`/`SIG_NUM_THREADS` list and the
+/// sync-signal handlers from the lister. It does not trace those siblings, so
+/// the handler's `ptrace` ops would merely fail with `ESRCH` - but they would
+/// also mask the real fault status the lister needs to see. Clearing the list
+/// the first thing in the child neutralizes the handler; a subsequent genuine
+/// fault then produces a clean death status. Exposed for `crate::lib`.
+pub fn disarm_crash_state() {
+    clear_crash_state();
 }
 
 /// Store an errno-style failure in the lister parameter block.

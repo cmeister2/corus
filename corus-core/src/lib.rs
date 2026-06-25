@@ -20,7 +20,7 @@ pub mod proc_parse;
 pub mod threads;
 
 use core::ffi::{c_char, c_int, c_void};
-use core::{mem, slice};
+use core::mem;
 
 /// Error returned by the core dump engine entrypoints.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -113,7 +113,7 @@ pub unsafe fn write_core_dump_to_fd_options(
         unsafe { corus_syscall::arch::capture_frame(&mut regs as *mut elf::Regs as *mut u64) };
         opts_owned.frame = Some((tid, regs));
     }
-    let mut ctx = DumpCtx {
+    let mut ctx = dump::DumpCtx {
         out_fd,
         opts: &opts_owned,
         result: -1,
@@ -121,8 +121,8 @@ pub unsafe fn write_core_dump_to_fd_options(
     };
     let rc = unsafe {
         threads::with_mmap_stack(
-            &mut ctx as *mut DumpCtx as *mut c_void,
-            dump_callback,
+            &mut ctx as *mut dump::DumpCtx as *mut c_void,
+            dump::dump_callback,
             dump::DUMP_CALLBACK_STACK,
         )
     };
@@ -183,9 +183,14 @@ pub unsafe fn write_core_dump_compressed_to_fd_with(
     // Spawn the compressor: it reads our pipe and writes out_fd.
     let pipeline =
         unsafe { compress::spawn(out_fd, path, argv) }.map_err(CoreDumpError::Compressor)?;
-    // Stream the uncompressed core into the compressor's stdin.
+    // Stream the uncompressed core into the compressor's stdin. With the
+    // fork-snapshot path this returns once the snapshot child is forked and the
+    // siblings resumed; the child (which inherited `write_fd`) keeps writing into
+    // the pipe in the background, and the lister has already reaped it by the
+    // time we get here. See `Pipeline` for the fd close/EOF discipline.
     let rc = unsafe { write_core_dump_to_fd_options(pipeline.write_fd, opts) };
-    // Close write end + reap; both the dump and the compressor must succeed.
+    // Close our copy of the write end (the child closed its copy on exit, so
+    // this delivers EOF to the compressor) + reap; both must succeed.
     let compressor_result = pipeline.finish();
     match rc {
         Ok(0) => compressor_result
@@ -194,62 +199,4 @@ pub unsafe fn write_core_dump_compressed_to_fd_with(
         Ok(rc) => Ok(rc),
         Err(e) => Err(e),
     }
-}
-
-/// Context passed to the lister callback while threads are suspended.
-struct DumpCtx<'a> {
-    /// Output file descriptor for the core stream.
-    out_fd: c_int,
-    /// Dump options shared with the callback.
-    opts: &'a dump::DumpOptions<'a>,
-    /// Callback result written before threads are resumed.
-    result: c_int,
-    /// Callback error detail, if available.
-    error: Option<dump::DumpError>,
-}
-
-/// Lister callback (runs with all threads suspended): build and stream the core.
-extern "C" fn dump_callback(param: *mut c_void, pids: *const c_int, num: c_int) -> c_int {
-    // SAFETY: `param` is the DumpCtx we passed; `pids`/`num` come from the lister.
-    let ctx = unsafe { &mut *(param as *mut DumpCtx) };
-    let pid_slice = unsafe { slice::from_raw_parts(pids, num.max(0) as usize) };
-
-    // The lister attaches to siblings including the original caller; the first
-    // tid the lister recorded that equals the parent's pid is the "main" thread.
-    // We use the parent pid (our process's pid) as main.
-    let main_pid = corus_syscall::sys::getpid()
-        .map(|p| p as c_int)
-        .unwrap_or(pid_slice.first().copied().unwrap_or(0));
-
-    // Unlimited -> SimpleWriter; a finite limit -> LimitWriter (truncates).
-    // A dump that "fails" only because the writer reached its size limit is a
-    // success (truncation is the intended outcome) - mirroring the C's
-    // `if (is_done(handle)) rc = 0;`.
-    use io::Writer;
-    let ok = match ctx.opts.max_length {
-        None => {
-            let mut writer = io::SimpleWriter { fd: ctx.out_fd };
-            let result =
-                unsafe { dump::dump_core_with(&mut writer, pid_slice, main_pid, ctx.opts) };
-            if let Err(error) = result {
-                ctx.error = Some(error);
-            }
-            result.is_ok() || writer.done()
-        }
-        Some(limit) => {
-            let mut writer = io::LimitWriter {
-                fd: ctx.out_fd,
-                max_length: limit,
-            };
-            let result =
-                unsafe { dump::dump_core_with(&mut writer, pid_slice, main_pid, ctx.opts) };
-            if let Err(error) = result {
-                ctx.error = Some(error);
-            }
-            result.is_ok() || writer.done()
-        }
-    };
-    ctx.result = if ok { 0 } else { -1 };
-    // Return 0 so the lister proceeds to resume threads.
-    0
 }

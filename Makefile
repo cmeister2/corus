@@ -25,8 +25,18 @@ tests:
 	$(MAKE) test-c-abi
 	$(MAKE) test-original-c-unit
 
+# Run the Rust tests under nextest with output uncaptured, so per-test
+# diagnostics (e.g. the strategy timing fractions) appear in CI logs. nextest
+# does not run doctests, so run those separately with plain `cargo test --doc`.
+# Override the runner with `NEXTEST=0` to fall back to `cargo test`.
+NEXTEST ?= 1
 test-rust:
+ifeq ($(NEXTEST),1)
+	$(CARGO) nextest run --workspace --no-capture
+	$(CARGO) test --workspace --doc
+else
 	$(CARGO) test --workspace
+endif
 
 $(LIBCORUS_A):
 	$(CARGO) build -p corus

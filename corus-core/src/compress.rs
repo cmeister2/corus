@@ -20,6 +20,19 @@ use crate::io::Pipe;
 
 /// A spawned compressor. Write the raw core to [`write_fd`](Self::write_fd),
 /// then [`finish`](Self::finish) to close it and reap the child.
+///
+/// ## Interaction with the fork-snapshot dump path
+///
+/// When the dump forks a copy-on-write snapshot child to write the core (the
+/// default), that child inherits this `write_fd` and is the one that streams the
+/// core into the compressor. The compressor sees EOF (and exits) only once
+/// *every* copy of `write_fd` is closed: the snapshot child's copy (closed when
+/// it `exit`s after writing the whole core) and the original caller's copy
+/// (closed by [`finish`](Self::finish)). So `finish`'s `wait4` on the compressor
+/// naturally blocks until the snapshot child has finished - which is correct,
+/// and which the lister has already guaranteed by reaping the snapshot child
+/// before the caller reaches `finish`. The two `wait4`s are on different pids
+/// (snapshot child vs. compressor), so they do not race.
 pub struct Pipeline {
     /// Write end of the pipe connected to the compressor's stdin.
     pub write_fd: c_int,

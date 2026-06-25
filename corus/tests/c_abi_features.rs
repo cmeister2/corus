@@ -226,6 +226,35 @@ fn extra_notes_appear_in_readelf() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// corus extension flag: select the `InProcessFrozen` dump strategy. Must match
+/// `COREDUMPER_FLAG_IN_PROCESS_FROZEN` in `capi.rs`.
+const COREDUMPER_FLAG_IN_PROCESS_FROZEN: c_int = 1 << 16;
+
+#[test]
+fn in_process_frozen_flag_dumps_via_c_abi() -> Result<(), Box<dyn std::error::Error>> {
+    let core = temp_dir().join(format!("cd_frozen_flag_{}.core", process::id()));
+    let path = CString::new(core.to_str().unwrap())?;
+    let _ = remove_file(&core);
+
+    // Select the no-fork strategy purely through the C flags field.
+    let mut params: CoreDumpParameters = unsafe { mem::zeroed() };
+    ClearCoreDumpParametersInternal(&mut params, mem::size_of::<CoreDumpParameters>());
+    params.flags |= COREDUMPER_FLAG_IN_PROCESS_FROZEN;
+
+    let rc = WriteCoreDumpWith(&params, path.as_ptr());
+    if ptrace_denied(rc, "in-process-frozen flag dump") {
+        return Ok(());
+    }
+    // The flag must be accepted and still produce a valid, non-empty core.
+    let len = core.metadata().expect("core exists").len();
+    assert!(
+        len > 0,
+        "frozen-strategy dump should write a non-empty core"
+    );
+    let _ = remove_file(&core);
+    Ok(())
+}
+
 static CALLBACK_HITS: AtomicI32 = AtomicI32::new(0);
 
 unsafe extern "C" fn ok_callback(arg: *mut c_void) -> c_int {

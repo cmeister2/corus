@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use corus_core::corus_syscall::linux::EINVAL;
-use corus_core::dump::{DumpOptions, ExtraNote};
+use corus_core::dump::{DumpOptions, DumpStrategy, ExtraNote};
 use corus_core::elf;
 
 use crate::params::{CoreDumpParameters, CoredumperCompressor, CoredumperNote};
@@ -31,6 +31,17 @@ use crate::params::{CoreDumpParameters, CoredumperCompressor, CoredumperNote};
 const COREDUMPER_FLAG_LIMITED: c_int = 1;
 /// Apply priority trimming before enforcing `max_length`.
 const COREDUMPER_FLAG_LIMITED_BY_PRIORITY: c_int = 2;
+
+// --- corus extension flags (added to google/coredumper.h, not upstream) ------
+// The original header only defines bits 1 and 2 and never changes (it is a
+// frozen fork), so this high bit cannot collide with it. The `flags` field is a
+// plain `int`, so adding a flag value does not alter the struct layout or the
+// exported-symbol set - it stays ABI-compatible with libcoredumper.
+/// Use the `InProcessFrozen` dump strategy: keep all threads stopped for the
+/// whole write instead of the default copy-on-write fork snapshot. Matches
+/// `COREDUMPER_FLAG_IN_PROCESS_FROZEN` in `google/coredumper.h`. See
+/// [`corus_core::dump::DumpStrategy`].
+const COREDUMPER_FLAG_IN_PROCESS_FROZEN: c_int = 0x10000;
 
 /// Set the platform thread-local errno.
 fn set_errno(e: c_int) {
@@ -253,6 +264,11 @@ unsafe fn dump_with_params_using(
 
     let limited = (p.flags & COREDUMPER_FLAG_LIMITED) != 0;
     let prioritize = (p.flags & COREDUMPER_FLAG_LIMITED_BY_PRIORITY) != 0;
+    let strategy = if (p.flags & COREDUMPER_FLAG_IN_PROCESS_FROZEN) != 0 {
+        DumpStrategy::InProcessFrozen
+    } else {
+        DumpStrategy::ForkSnapshot
+    };
 
     // Convert the C notes array into engine ExtraNote borrows on the stack.
     let mut notes_buf: [ExtraNote; MAX_EXTRA_NOTES] = [ExtraNote {
@@ -311,6 +327,8 @@ unsafe fn dump_with_params_using(
         // Caller-frame override captured at the public entry (or None -> the
         // engine captures its own, deeper, frame as a fallback).
         frame,
+        // Fork-snapshot by default; InProcessFrozen if the caller set the flag.
+        strategy,
     };
     dump(out_fd, &opts)
 }

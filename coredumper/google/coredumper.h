@@ -105,6 +105,17 @@ struct CoreDumpParameters {
  */
 #define COREDUMPER_FLAG_LIMITED_BY_PRIORITY 2
 
+/* corus extension (not in the original google-coredumper): write the core with
+ * all threads kept stopped for the whole dump, instead of corus's default
+ * copy-on-write fork snapshot. The default minimizes the pause by resuming the
+ * other threads as soon as registers are captured and writing the core from a
+ * fork child; set this flag to keep the strict "everything frozen until the
+ * write completes" semantics (e.g. for MAP_SHARED / MADV_DONTFORK /
+ * MADV_WIPEONFORK fidelity, or to avoid fork()). High bit so it never collides
+ * with the original flags above.
+ */
+#define COREDUMPER_FLAG_IN_PROCESS_FROZEN 0x10000
+
 /* Try compressing with either bzip2, gzip, or compress. If all of those fail,
  * fall back on generating an uncompressed file.
  */

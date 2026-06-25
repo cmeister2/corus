@@ -39,4 +39,5 @@ pub mod capi;
 pub mod params;
 pub mod rust_api;
 
+pub use corus_core::dump::DumpStrategy;
 pub use rust_api::{Compression, CoreDump, Error};
