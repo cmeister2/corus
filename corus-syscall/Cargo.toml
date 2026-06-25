@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 description = "no_std raw Linux syscall wrappers for corus."
 keywords = ["syscall", "linux", "nostd", "asm", "coredump"]
+readme = "README.md"
 
 [lib]
 # Pure no_std library: no allocator, no libc reachable from here.
