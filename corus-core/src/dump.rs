@@ -50,7 +50,7 @@ use core::mem::{self, MaybeUninit};
 use core::ptr;
 use core::slice;
 
-use corus_syscall::{arch::PAGE_SIZE, linux::O_RDONLY, sys};
+use corus_syscall::{arch, arch::PAGE_SIZE, linux::O_RDONLY, sys};
 
 use crate::elf::{AuxvT, CoreUser, FpRegs, Prpsinfo, Regs};
 use crate::elfcore::{CoreInputs, CreateElfCoreError, ThreadState};
@@ -326,13 +326,13 @@ pub unsafe fn capture_dump(
         let mut regs: Regs = unsafe { mem::zeroed() };
         let mut fpregs: FpRegs = unsafe { mem::zeroed() };
         if let Err(errno) =
-            unsafe { sys::ptrace_getregs(pid, &mut regs as *mut Regs as *mut c_void) }
+            unsafe { arch::ptrace_get_gpregs(pid, &mut regs as *mut Regs as *mut c_void) }
         {
             return Err(DumpError::PtraceGetRegs { pid, errno });
         }
 
         // FP registers are best-effort: a failure leaves them zeroed.
-        let _ = unsafe { sys::ptrace_getfpregs(pid, &mut fpregs as *mut FpRegs as *mut c_void) };
+        let _ = unsafe { arch::ptrace_get_fpregs(pid, &mut fpregs as *mut FpRegs as *mut c_void) };
 
         // FRAME() override: for the thread that called the public API, replace
         // the ptrace-captured regs (parked in wait4) with the caller's snapshot
@@ -386,6 +386,11 @@ pub unsafe fn serialize_dump(
     cap: &CapturedDump,
     opts: &DumpOptions,
 ) -> Result<(), DumpError> {
+    // x86_64 has a fixed 4K page. On arches with a variable page size (e.g.
+    // aarch64 kernels ship 4K/16K/64K), this must instead come from AT_PAGESZ
+    // in the captured auxv rather than this compile-time constant. The value is
+    // a single runtime local threaded through mapping selection, NT_FILE, and
+    // PT_LOAD alignment below, so only this binding changes.
     let pagesize = PAGE_SIZE;
 
     // --- Memory mappings ---

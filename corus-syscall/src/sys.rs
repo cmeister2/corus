@@ -315,41 +315,6 @@ pub unsafe fn ptrace(
     })
 }
 
-// ptrace request numbers used for register capture.
-/// `PTRACE_GETREGS` request number.
-const PTRACE_GETREGS: c_int = 12;
-/// `PTRACE_GETFPREGS` request number.
-const PTRACE_GETFPREGS: c_int = 14;
-
-/// `ptrace(PTRACE_GETREGS, pid)` - fill `regs_out` (a `user_regs_struct`-shaped
-/// buffer) with the tracee's general-purpose registers.
-///
-/// # Errors
-/// Returns the kernel errno if the ptrace request fails.
-///
-/// # Safety
-/// `regs_out` must point to a buffer at least the size of the kernel's
-/// `user_regs_struct` (the caller's `Regs`). The tracee must be ptrace-stopped.
-#[inline]
-pub unsafe fn ptrace_getregs(pid: c_int, regs_out: *mut c_void) -> SysResult {
-    // On x86_64 the addr arg is ignored; data points at the output buffer.
-    unsafe { ptrace(PTRACE_GETREGS, pid, core::ptr::null_mut(), regs_out) }
-}
-
-/// `ptrace(PTRACE_GETFPREGS, pid)` - fill `fpregs_out` (a
-/// `user_fpregs_struct`-shaped buffer) with the tracee's FPU/SSE registers.
-///
-/// # Errors
-/// Returns the kernel errno if the ptrace request fails.
-///
-/// # Safety
-/// `fpregs_out` must point to a buffer at least the size of the kernel's
-/// `user_fpregs_struct` (the caller's `FpRegs`). The tracee must be stopped.
-#[inline]
-pub unsafe fn ptrace_getfpregs(pid: c_int, fpregs_out: *mut c_void) -> SysResult {
-    unsafe { ptrace(PTRACE_GETFPREGS, pid, core::ptr::null_mut(), fpregs_out) }
-}
-
 /// `wait4(2)`.
 ///
 /// # Errors

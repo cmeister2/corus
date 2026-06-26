@@ -46,6 +46,16 @@ pub const ET_CORE: u16 = 4;
 // e_machine
 /// ELF machine value for x86_64.
 pub const EM_X86_64: u16 = 62;
+/// ELF machine value for aarch64 (ARM64).
+pub const EM_AARCH64: u16 = 183;
+
+/// The `e_machine` value for the architecture this build targets. Set into the
+/// core file's ELF header so debuggers identify the dump's ISA correctly.
+#[cfg(target_arch = "x86_64")]
+pub const ELF_MACHINE: u16 = EM_X86_64;
+/// The `e_machine` value for the architecture this build targets.
+#[cfg(target_arch = "aarch64")]
+pub const ELF_MACHINE: u16 = EM_AARCH64;
 
 // Program header p_type
 /// Program header type for loadable segments.
@@ -421,7 +431,7 @@ impl Ehdr {
         e.e_ident[EI_VERSION] = EV_CURRENT;
         e.e_ident[EI_OSABI] = ELFOSABI_SYSV;
         e.e_type = ET_CORE;
-        e.e_machine = EM_X86_64;
+        e.e_machine = ELF_MACHINE;
         e.e_version = EV_CURRENT as u32;
         e.e_ehsize = mem::size_of::<Ehdr>() as u16;
         e.e_phentsize = mem::size_of::<Phdr>() as u16;
@@ -547,7 +557,25 @@ const _: () = {
 
     assert!(size_of::<AuxvT>() == 16 && align_of::<AuxvT>() == 8);
 
-    // Register / note payloads
+    assert!(size_of::<ElfTimeval>() == 16 && align_of::<ElfTimeval>() == 8);
+    assert!(size_of::<ElfSiginfo>() == 12 && align_of::<ElfSiginfo>() == 4);
+
+    // Prpsinfo is arch-neutral (no register fields).
+    assert!(size_of::<Prpsinfo>() == 136 && align_of::<Prpsinfo>() == 8);
+    assert!(offset_of!(Prpsinfo, pr_flag) == 8);
+    assert!(offset_of!(Prpsinfo, pr_uid) == 16);
+    assert!(offset_of!(Prpsinfo, pr_pid) == 24);
+    assert!(offset_of!(Prpsinfo, pr_fname) == 40);
+    assert!(offset_of!(Prpsinfo, pr_psargs) == 56);
+};
+
+// Register/note payloads whose size depends on the target's register file.
+// `Regs`/`FpRegs` (and thus `Prstatus`/`CoreUser`, which embed them) are
+// arch-specific; each arch asserts its own golden layout from the C ABI.
+#[cfg(target_arch = "x86_64")]
+const _: () = {
+    use mem::{align_of, offset_of, size_of};
+
     assert!(size_of::<Regs>() == 216 && align_of::<Regs>() == 8);
     assert!(offset_of!(Regs, r15) == 0);
     assert!(offset_of!(Regs, rip) == 128);
@@ -559,22 +587,12 @@ const _: () = {
     assert!(offset_of!(FpRegs, st_space) == 32);
     assert!(offset_of!(FpRegs, xmm_space) == 160);
 
-    assert!(size_of::<ElfTimeval>() == 16 && align_of::<ElfTimeval>() == 8);
-    assert!(size_of::<ElfSiginfo>() == 12 && align_of::<ElfSiginfo>() == 4);
-
     assert!(size_of::<Prstatus>() == 336 && align_of::<Prstatus>() == 8);
     assert!(offset_of!(Prstatus, pr_info) == 0);
     assert!(offset_of!(Prstatus, pr_cursig) == 12);
     assert!(offset_of!(Prstatus, pr_pid) == 32);
     assert!(offset_of!(Prstatus, pr_reg) == 112);
     assert!(offset_of!(Prstatus, pr_fpvalid) == 328);
-
-    assert!(size_of::<Prpsinfo>() == 136 && align_of::<Prpsinfo>() == 8);
-    assert!(offset_of!(Prpsinfo, pr_flag) == 8);
-    assert!(offset_of!(Prpsinfo, pr_uid) == 16);
-    assert!(offset_of!(Prpsinfo, pr_pid) == 24);
-    assert!(offset_of!(Prpsinfo, pr_fname) == 40);
-    assert!(offset_of!(Prpsinfo, pr_psargs) == 56);
 
     assert!(size_of::<CoreUser>() == 928 && align_of::<CoreUser>() == 8);
     assert!(offset_of!(CoreUser, regs) == 0);
