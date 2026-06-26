@@ -1,0 +1,20 @@
+# aarch64 build image for corus, published to ghcr.io.
+#
+# Provides an arm64 environment with the Rust toolchain, cargo-nextest, and the
+# native tools the project needs (gdb/readelf/gcore via elfutils + binutils, a C
+# compiler for the C-ABI sources). Built natively on an arm64 runner.
+FROM rust:1-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        binutils \
+        build-essential \
+        elfutils \
+        gdb \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build natively on arm64, so a from-source install is a quick compile rather
+# than the ~10 min penalty it would incur under emulation.
+RUN cargo install cargo-nextest --locked
+
+WORKDIR /src
