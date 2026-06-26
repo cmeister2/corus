@@ -142,15 +142,21 @@ fn strategy_controls_whether_siblings_run_during_write() -> Result<(), Box<dyn s
         100.0 * fork.fraction,
     );
 
-    // The decisive, environment-robust check: the fork-snapshot sibling makes
-    // substantially more progress during the write than the frozen one. If the
-    // strategy flag were ignored, the two would be indistinguishable.
+    // The decisive, environment-robust check, framed as *slowdown* rather than
+    // throughput: freezing the siblings slows them far more than the fork
+    // snapshot does. Comparing slowdowns (1 - fraction) is robust on fast
+    // machines where both throughput fractions crowd near 1.0 - there, the
+    // throughput ratio `fork > 2*frozen` can spuriously fail (e.g. 0.97 vs
+    // 0.50), while the slowdown gap (0.03 vs 0.50) stays decisive. If the
+    // strategy flag were ignored, the two slowdowns would be indistinguishable.
+    let fork_slowdown = 1.0 - fork.fraction;
+    let frozen_slowdown = 1.0 - frozen.fraction;
     assert!(
-        fork.fraction > 2.0 * frozen.fraction,
-        "expected ForkSnapshot ({:.0}%) to keep the sibling running much more \
-         than InProcessFrozen ({:.0}%); the strategy may not be taking effect",
-        100.0 * fork.fraction,
-        100.0 * frozen.fraction,
+        frozen_slowdown > 2.0 * fork_slowdown,
+        "expected InProcessFrozen to slow the sibling much more ({:.0}% slowdown) \
+         than ForkSnapshot ({:.0}% slowdown); the strategy may not be taking effect",
+        100.0 * frozen_slowdown,
+        100.0 * fork_slowdown,
     );
     Ok(())
 }
