@@ -212,6 +212,7 @@ fn getdents_reads_proc_self_task() {
 /// real function-call boundary (forcing the ABI to spill/restore correctly),
 /// then read them back - all observed through `black_box` so the optimizer
 /// cannot prove the values constant and elide the check.
+#[cfg(target_arch = "x86_64")]
 #[test]
 fn syscall_preserves_callee_saved_registers() {
     use core::hint::black_box;
@@ -260,8 +261,64 @@ fn syscall_preserves_callee_saved_registers() {
     }
 }
 
-// extern "sysv64" shim with a fixed symbol the asm! `sym` operand can call.
-// Performs a real syscall through our wrapper inside a genuine call frame.
+/// aarch64 counterpart: x20-x23 are callee-saved (AAPCS) and usable as explicit
+/// asm operands (x19 is reserved internally by LLVM, x18 is the platform
+/// register, so neither can be an operand). Pin sentinels into them, call the
+/// wrapper through a real ABI boundary, and confirm they survive.
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn syscall_preserves_callee_saved_registers() {
+    use core::hint::black_box;
+
+    let pid = unsafe { libc::getpid() };
+
+    for i in 0..2000u64 {
+        let s_x20 = black_box(0x2222_0000u64 ^ i);
+        let s_x21 = black_box(0x3333_0000u64 ^ i);
+        let s_x22 = black_box(0x4444_0000u64 ^ i);
+        let s_x23 = black_box(0x5555_0000u64 ^ i);
+
+        let o_x20: u64;
+        let o_x21: u64;
+        let o_x22: u64;
+        let o_x23: u64;
+        let ret: i32;
+        unsafe {
+            core::arch::asm!(
+                "blr {f}",
+                f = in(reg) do_syscall_shim as extern "C" fn() -> i32,
+                inout("x20") s_x20 => o_x20,
+                inout("x21") s_x21 => o_x21,
+                inout("x22") s_x22 => o_x22,
+                inout("x23") s_x23 => o_x23,
+                out("x0") ret,
+                // Caller-saved scratch the call/syscall may use.
+                out("x1") _, out("x2") _, out("x3") _, out("x4") _,
+                out("x5") _, out("x6") _, out("x7") _, out("x8") _,
+                out("x9") _, out("x10") _, out("x11") _, out("x12") _,
+                out("x13") _, out("x14") _, out("x15") _, out("x16") _,
+                out("x17") _, out("lr") _,
+            );
+        }
+
+        assert_eq!(o_x20, s_x20, "x20 corrupted by syscall wrapper");
+        assert_eq!(o_x21, s_x21, "x21 corrupted by syscall wrapper");
+        assert_eq!(o_x22, s_x22, "x22 corrupted by syscall wrapper");
+        assert_eq!(o_x23, s_x23, "x23 corrupted by syscall wrapper");
+        assert_eq!(black_box(ret), pid, "syscall returned wrong value");
+    }
+}
+
+// Shim with a fixed symbol the asm! call can target. Performs a real syscall
+// through our wrapper inside a genuine call frame. On x86_64 the `sym` operand
+// requires `extern "sysv64"`; on aarch64 a plain `extern "C"` fn pointer in a
+// register is used.
+#[cfg(target_arch = "x86_64")]
 extern "sysv64" fn do_syscall_shim() -> i32 {
+    sys::getpid().unwrap() as i32
+}
+
+#[cfg(target_arch = "aarch64")]
+extern "C" fn do_syscall_shim() -> i32 {
     sys::getpid().unwrap() as i32
 }

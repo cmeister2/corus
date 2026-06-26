@@ -11,6 +11,10 @@
 
 use core::ffi::{c_char, c_int, c_void};
 
+// `syscall5` is only used by the aarch64 wrappers (fork-via-clone, ppoll);
+// allow it to be unused on x86_64 rather than churn the import list per-arch.
+#[cfg_attr(target_arch = "x86_64", allow(unused_imports))]
+use crate::arch::syscall5;
 use crate::arch::{nr, syscall0, syscall1, syscall2, syscall3, syscall4, syscall6};
 use crate::from_ret;
 use crate::kernel_types::{
@@ -31,7 +35,23 @@ pub type SysResult = Result<usize, i32>;
 /// `pathname` must point to a valid NUL-terminated C string.
 #[inline]
 pub unsafe fn open(pathname: *const c_char, flags: c_int, mode: c_int) -> SysResult {
-    from_ret(unsafe { syscall3(nr::OPEN, pathname as usize, flags as usize, mode as usize) })
+    #[cfg(target_arch = "x86_64")]
+    {
+        from_ret(unsafe { syscall3(nr::OPEN, pathname as usize, flags as usize, mode as usize) })
+    }
+    // aarch64 has no legacy `open`; use `openat(AT_FDCWD, ...)`.
+    #[cfg(target_arch = "aarch64")]
+    {
+        from_ret(unsafe {
+            syscall4(
+                nr::OPENAT,
+                crate::linux::AT_FDCWD as usize,
+                pathname as usize,
+                flags as usize,
+                mode as usize,
+            )
+        })
+    }
 }
 
 /// `close(2)`.
@@ -122,7 +142,23 @@ pub unsafe fn pipe2(pipefd: *mut c_int, flags: c_int) -> SysResult {
 /// `pathname` is a valid C string; `buf` is valid for writes of `bufsiz`.
 #[inline]
 pub unsafe fn readlink(pathname: *const c_char, buf: *mut c_char, bufsiz: usize) -> SysResult {
-    from_ret(unsafe { syscall3(nr::READLINK, pathname as usize, buf as usize, bufsiz) })
+    #[cfg(target_arch = "x86_64")]
+    {
+        from_ret(unsafe { syscall3(nr::READLINK, pathname as usize, buf as usize, bufsiz) })
+    }
+    // aarch64 has no legacy `readlink`; use `readlinkat(AT_FDCWD, ...)`.
+    #[cfg(target_arch = "aarch64")]
+    {
+        from_ret(unsafe {
+            syscall4(
+                nr::READLINKAT,
+                crate::linux::AT_FDCWD as usize,
+                pathname as usize,
+                buf as usize,
+                bufsiz,
+            )
+        })
+    }
 }
 
 /// `getdents(2)` (legacy; matches [`crate::kernel_types::KernelDirent`]).
@@ -134,7 +170,15 @@ pub unsafe fn readlink(pathname: *const c_char, buf: *mut c_char, bufsiz: usize)
 /// `dirp` must be valid for writes of `count` bytes.
 #[inline]
 pub unsafe fn getdents(fd: c_int, dirp: *mut c_void, count: usize) -> SysResult {
-    from_ret(unsafe { syscall3(nr::GETDENTS, fd as usize, dirp as usize, count) })
+    // x86_64 uses legacy `getdents`; aarch64 has only `getdents64`. The
+    // `KernelDirent` layout is arch-gated to match (getdents64 inserts a
+    // `d_type` byte before `d_name`); the dirent-loop fields the parser reads
+    // (`d_ino`/`d_reclen`/`d_name`) line up under both.
+    #[cfg(target_arch = "x86_64")]
+    let n = nr::GETDENTS;
+    #[cfg(target_arch = "aarch64")]
+    let n = nr::GETDENTS64;
+    from_ret(unsafe { syscall3(n, fd as usize, dirp as usize, count) })
 }
 
 // --- stat --------------------------------------------------------------------
@@ -149,7 +193,24 @@ pub unsafe fn getdents(fd: c_int, dirp: *mut c_void, count: usize) -> SysResult 
 /// [`KernelStat`].
 #[inline]
 pub unsafe fn stat(pathname: *const c_char, statbuf: *mut KernelStat) -> SysResult {
-    from_ret(unsafe { syscall2(nr::STAT, pathname as usize, statbuf as usize) })
+    #[cfg(target_arch = "x86_64")]
+    {
+        from_ret(unsafe { syscall2(nr::STAT, pathname as usize, statbuf as usize) })
+    }
+    // aarch64 has no legacy `stat`; use `newfstatat(AT_FDCWD, ..., flags=0)`,
+    // which follows symlinks like `stat`.
+    #[cfg(target_arch = "aarch64")]
+    {
+        from_ret(unsafe {
+            syscall4(
+                nr::NEWFSTATAT,
+                crate::linux::AT_FDCWD as usize,
+                pathname as usize,
+                statbuf as usize,
+                0,
+            )
+        })
+    }
 }
 
 /// `fstat(2)`.
@@ -388,17 +449,28 @@ pub unsafe fn rt_sigaction(
     oldact: *mut KernelSigaction,
     sigsetsize: usize,
 ) -> SysResult {
-    // If a handler is being installed without a restorer, supply ours. We copy
-    // into a local so we don't mutate the caller's struct.
+    // On x86_64 the kernel requires an SA_RESTORER: if a handler is being
+    // installed without one, supply ours. We copy into a local so we don't
+    // mutate the caller's struct. aarch64 needs no restorer (the kernel
+    // supplies the sigreturn trampoline), so the act pointer is used verbatim.
+    #[cfg(target_arch = "x86_64")]
     let mut local;
+    #[cfg_attr(target_arch = "aarch64", allow(unused_mut))]
     let act_ptr = if !act.is_null() {
-        // SAFETY: caller guarantees `act` is valid.
-        local = unsafe { *act };
-        if local.sa_restorer.is_null() {
-            local.sa_flags |= crate::arch::SA_RESTORER;
-            local.sa_restorer = crate::arch::restore_rt_addr() as *mut c_void;
+        #[cfg(target_arch = "x86_64")]
+        {
+            // SAFETY: caller guarantees `act` is valid.
+            local = unsafe { *act };
+            if local.sa_restorer.is_null() {
+                local.sa_flags |= crate::arch::SA_RESTORER;
+                local.sa_restorer = crate::arch::restore_rt_addr() as *mut c_void;
+            }
+            &local as *const KernelSigaction
         }
-        &local as *const KernelSigaction
+        #[cfg(target_arch = "aarch64")]
+        {
+            act
+        }
     } else {
         act
     };
@@ -529,8 +601,22 @@ pub fn shutdown(sockfd: c_int, how: c_int) -> SysResult {
 /// Returns the kernel errno if the syscall fails.
 #[inline]
 pub fn fork() -> SysResult {
-    // SAFETY: fork takes no arguments and dereferences no memory.
-    from_ret(unsafe { syscall0(nr::FORK) })
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: fork takes no arguments and dereferences no memory.
+        from_ret(unsafe { syscall0(nr::FORK) })
+    }
+    // aarch64 has no `fork`; emulate it with the raw `clone` syscall using
+    // `SIGCHLD` as the exit signal and no other flags (i.e. a new address-space
+    // copy, exactly like fork). All five clone args are zero except flags.
+    #[cfg(target_arch = "aarch64")]
+    {
+        const SIGCHLD: usize = 17;
+        // SAFETY: a bare clone(SIGCHLD, 0, 0, 0, 0) performs a fork-equivalent;
+        // no pointers are dereferenced (child_stack=0 means "use copy of caller
+        // stack", the fork behavior).
+        from_ret(unsafe { syscall5(nr::CLONE, SIGCHLD, 0, 0, 0, 0) })
+    }
 }
 
 /// `dup2(2)` - duplicate `oldfd` onto `newfd`.
@@ -642,7 +728,32 @@ pub unsafe fn recvmsg(sockfd: c_int, msg: *mut KernelMsghdr, flags: c_int) -> Sy
 /// `fds` must point to `nfds` valid [`KernelPollfd`] entries.
 #[inline]
 pub unsafe fn poll(fds: *mut KernelPollfd, nfds: usize, timeout: c_int) -> SysResult {
-    from_ret(unsafe { syscall3(nr::POLL, fds as usize, nfds, timeout as usize) })
+    #[cfg(target_arch = "x86_64")]
+    {
+        from_ret(unsafe { syscall3(nr::POLL, fds as usize, nfds, timeout as usize) })
+    }
+    // aarch64 has no legacy `poll`; use `ppoll`, converting the millisecond
+    // timeout into a `timespec` (negative timeout = block indefinitely = null
+    // timespec). No signal mask is applied.
+    #[cfg(target_arch = "aarch64")]
+    {
+        #[repr(C)]
+        struct Timespec {
+            tv_sec: i64,
+            tv_nsec: i64,
+        }
+        let ts;
+        let ts_ptr = if timeout < 0 {
+            core::ptr::null::<Timespec>()
+        } else {
+            ts = Timespec {
+                tv_sec: (timeout as i64) / 1000,
+                tv_nsec: ((timeout as i64) % 1000) * 1_000_000,
+            };
+            &ts as *const Timespec
+        };
+        from_ret(unsafe { syscall5(nr::PPOLL, fds as usize, nfds, ts_ptr as usize, 0, 0) })
+    }
 }
 
 /// Convenience: number of bytes in a [`KernelSigset`], for `rt_sigprocmask`.

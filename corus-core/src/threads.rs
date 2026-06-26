@@ -22,7 +22,7 @@
 //!   than silently truncating (logged via the error return).
 //! - **Callback**: a C-ABI fn pointer + context pointer rather than varargs.
 
-use core::ffi::{c_int, c_void};
+use core::ffi::{c_char, c_int, c_void};
 use core::sync::atomic::{AtomicI32, AtomicPtr, AtomicUsize, Ordering};
 use core::{mem, ptr};
 
@@ -30,7 +30,7 @@ use corus_syscall::arch::PAGE_SIZE;
 use corus_syscall::kernel_types::{
     KernelDirent, KernelSigaction, KernelSigset, KernelStat, StackT,
 };
-use corus_syscall::linux::{ECHILD, EFAULT, EINTR, ENOMEM, EPERM, O_RDONLY};
+use corus_syscall::linux::{ECHILD, EFAULT, EINTR, ENOMEM, EPERM, O_DIRECTORY, O_RDONLY};
 use corus_syscall::{clone, sys};
 
 // --- Lister crash-cleanup signal state ---------------------------------------
@@ -158,9 +158,7 @@ pub const MAX_THREADS: usize = 4096;
 pub type ThreadCallback =
     extern "C" fn(param: *mut c_void, pids: *const c_int, num: c_int) -> c_int;
 
-// Linux constants (x86_64) used here.
-/// `open(2)` directory-only flag.
-const O_DIRECTORY: c_int = 0o200000;
+// Linux constants used here.
 /// Local/Unix socket protocol family.
 const PF_LOCAL: c_int = 1;
 /// Datagram socket type.
@@ -249,7 +247,7 @@ fn local_atoi(s: &[u8]) -> i32 {
 /// `open(2)` that retries on EINTR. Port of `c_open`.
 fn c_open(path: &[u8], flags: c_int) -> sys::SysResult {
     loop {
-        match unsafe { sys::open(path.as_ptr() as *const i8, flags, 0) } {
+        match unsafe { sys::open(path.as_ptr() as *const c_char, flags, 0) } {
             Err(EINTR) => continue,
             other => return other,
         }
@@ -330,7 +328,8 @@ extern "C" fn lister_thread(arg: *mut c_void) -> c_int {
     let mut marker_sb = KernelStat::zeroed();
     // SAFETY: marker_name is NUL? No - build a NUL-terminated copy.
     let marker_cstr = nul_terminate(&marker_name, mlen);
-    if let Err(errno) = unsafe { sys::stat(marker_cstr.as_ptr() as *const i8, &mut marker_sb) } {
+    if let Err(errno) = unsafe { sys::stat(marker_cstr.as_ptr() as *const c_char, &mut marker_sb) }
+    {
         let _ = sys::close(marker);
         return fail(params, errno);
     }
@@ -587,7 +586,7 @@ fn thread_shares_address_space(tid: c_int, marker: c_int, marker_sb: &KernelStat
     len += build_path(&mut path[len..], &[b"/fd/"], Some(marker));
     let cstr = nul_terminate(&path, len);
     let mut sb = KernelStat::zeroed();
-    if unsafe { sys::stat(cstr.as_ptr() as *const i8, &mut sb) }.is_err() {
+    if unsafe { sys::stat(cstr.as_ptr() as *const c_char, &mut sb) }.is_err() {
         return false;
     }
     sb.st_ino == marker_sb.st_ino

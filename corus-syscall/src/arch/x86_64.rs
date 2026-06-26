@@ -479,8 +479,16 @@ const PTRACE_GETFPREGS: usize = 14;
 /// # Safety
 /// `out` must point to a buffer at least the size of the kernel's
 /// `user_regs_struct` (the caller's `Regs`). The tracee must be ptrace-stopped.
+///
+/// `out_len` is accepted for signature parity with aarch64 (whose
+/// `PTRACE_GETREGSET` needs the buffer length in an iovec); x86_64's
+/// `PTRACE_GETREGS` fills a fixed-size buffer and ignores it.
 #[inline]
-pub unsafe fn ptrace_get_gpregs(pid: i32, out: *mut core::ffi::c_void) -> Result<usize, i32> {
+pub unsafe fn ptrace_get_gpregs(
+    pid: i32,
+    out: *mut core::ffi::c_void,
+    _out_len: usize,
+) -> Result<usize, i32> {
     // addr ignored on x86_64; data points at the output buffer.
     crate::from_ret(unsafe { syscall4(nr::PTRACE, PTRACE_GETREGS, pid as usize, 0, out as usize) })
 }
@@ -495,7 +503,11 @@ pub unsafe fn ptrace_get_gpregs(pid: i32, out: *mut core::ffi::c_void) -> Result
 /// `out` must point to a buffer at least the size of the kernel's
 /// `user_fpregs_struct` (the caller's `FpRegs`). The tracee must be stopped.
 #[inline]
-pub unsafe fn ptrace_get_fpregs(pid: i32, out: *mut core::ffi::c_void) -> Result<usize, i32> {
+pub unsafe fn ptrace_get_fpregs(
+    pid: i32,
+    out: *mut core::ffi::c_void,
+    _out_len: usize,
+) -> Result<usize, i32> {
     crate::from_ret(unsafe {
         syscall4(nr::PTRACE, PTRACE_GETFPREGS, pid as usize, 0, out as usize)
     })

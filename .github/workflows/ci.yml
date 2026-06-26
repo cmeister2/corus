@@ -48,6 +48,56 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y binutils build-essential elfutils gdb
+      # Fast gate: verify the lister's raw primitives (clone/getdents/ptrace)
+      # work before running the full suite, so a regression points at the
+      # primitive rather than an opaque dump failure.
+      - name: Lister primitives smoke test
+        run: cargo run -p corus --example lister_primitives
+      - run: make tests
+
+  cross-aarch64:
+    name: Cross-compile (aarch64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install aarch64 cross linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Cross-build and lint aarch64
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          cargo build --workspace --target aarch64-unknown-linux-gnu
+          cargo clippy --workspace --target aarch64-unknown-linux-gnu -- -D warnings
+
+  test-aarch64:
+    name: Test (aarch64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy,rustfmt
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # v2
+        with:
+          tool: cargo-nextest
+      - name: Install test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils build-essential elfutils gdb
+      # Fast gate: verify the lister's raw primitives (clone/getdents/ptrace)
+      # work before running the full suite, so a regression points at the
+      # primitive rather than an opaque dump failure.
+      - name: Lister primitives smoke test
+        run: cargo run -p corus --example lister_primitives
       - run: make tests
 
   clippy:
@@ -75,7 +125,7 @@ jobs:
 
   publish-dry-run:
     name: Publish dry-run
-    needs: [build, test, clippy, fmt]
+    needs: [build, test, cross-aarch64, test-aarch64, clippy, fmt]
     runs-on: ubuntu-latest
     if: github.event_name != 'push' || github.ref != 'refs/heads/main'
     permissions:
@@ -90,7 +140,7 @@ jobs:
 
   release:
     name: Release
-    needs: [build, test, clippy, fmt]
+    needs: [build, test, cross-aarch64, test-aarch64, clippy, fmt]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment: release
@@ -118,7 +168,7 @@ jobs:
 
   success:
     name: Success
-    needs: [build, test, clippy, fmt, publish-dry-run, release]
+    needs: [build, test, cross-aarch64, test-aarch64, clippy, fmt, publish-dry-run, release]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -126,6 +176,8 @@ jobs:
         env:
           BUILD_RESULT: ${{ needs.build.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          CROSS_AARCH64_RESULT: ${{ needs.cross-aarch64.result }}
+          TEST_AARCH64_RESULT: ${{ needs.test-aarch64.result }}
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           FMT_RESULT: ${{ needs.fmt.result }}
           DRY_RUN_RESULT: ${{ needs.publish-dry-run.result }}
@@ -133,6 +185,8 @@ jobs:
         run: |
           test "${BUILD_RESULT}" = success
           test "${TEST_RESULT}" = success
+          test "${CROSS_AARCH64_RESULT}" = success
+          test "${TEST_AARCH64_RESULT}" = success
           test "${CLIPPY_RESULT}" = success
           test "${FMT_RESULT}" = success
           case "${DRY_RUN_RESULT}" in success|skipped) ;; *) exit 1 ;; esac

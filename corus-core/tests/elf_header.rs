@@ -6,7 +6,7 @@
 
 mod common;
 
-use corus_core::elf::{ELFCLASS64, ELFDATA2LSB, ELFMAG, EM_X86_64, ET_CORE, Ehdr, PT_NOTE, Phdr};
+use corus_core::elf::{ELF_MACHINE, ELFCLASS64, ELFDATA2LSB, ELFMAG, ET_CORE, Ehdr, PT_NOTE, Phdr};
 use std::io::Write;
 
 use common::readelf_header;
@@ -18,13 +18,12 @@ fn ehdr_fields_are_well_formed() {
     assert_eq!(e.e_ident[4], ELFCLASS64);
     assert_eq!(e.e_ident[5], ELFDATA2LSB);
     assert_eq!(e.e_type, ET_CORE);
-    assert_eq!(e.e_machine, EM_X86_64);
+    assert_eq!(e.e_machine, ELF_MACHINE);
     assert_eq!(e.e_ehsize as usize, core::mem::size_of::<Ehdr>());
     assert_eq!(e.e_phentsize as usize, core::mem::size_of::<Phdr>());
 }
 
 #[test]
-#[cfg(target_arch = "x86_64")]
 fn minimal_core_header_parses_with_readelf() {
     // Build Ehdr + one PT_NOTE phdr right after it.
     let mut e = Ehdr::new_core();
@@ -78,10 +77,12 @@ fn minimal_core_header_parses_with_readelf() {
         stdout.contains("Core file") || stdout.contains("CORE"),
         "not a core file:\n{stdout}"
     );
-    assert!(
-        stdout.contains("X86-64") || stdout.contains("x86-64") || stdout.contains("Advanced Micro"),
-        "wrong machine:\n{stdout}"
-    );
+    #[cfg(target_arch = "x86_64")]
+    let machine_ok =
+        stdout.contains("X86-64") || stdout.contains("x86-64") || stdout.contains("Advanced Micro");
+    #[cfg(target_arch = "aarch64")]
+    let machine_ok = stdout.contains("AArch64") || stdout.contains("aarch64");
+    assert!(machine_ok, "wrong machine:\n{stdout}");
     // Whitespace-tolerant: readelf pads the value column.
     let phnum_ok = stdout.lines().any(|l| {
         l.contains("Number of program headers:") && l.split_whitespace().last() == Some("1")

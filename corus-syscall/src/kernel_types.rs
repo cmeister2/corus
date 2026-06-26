@@ -8,6 +8,7 @@ use core::ffi::{c_int, c_short, c_uint, c_ushort, c_void};
 use core::mem;
 
 /// `struct kernel_stat` for x86_64 (golden: size 144, align 8).
+#[cfg(target_arch = "x86_64")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct KernelStat {
@@ -49,6 +50,57 @@ pub struct KernelStat {
     pub __unused4: [i64; 3],
 }
 
+/// `struct kernel_stat` for aarch64 (golden: size 128, align 8). Differs from
+/// x86_64: `st_mode`/`st_nlink`/`st_uid`/`st_gid` are 32-bit and come right
+/// after `st_ino` (so `st_mode` is at offset 16, not 24), with `st_rdev` plus a
+/// pad word before `st_size`. Matches the `__aarch64__` layout in the original
+/// `linux_syscall_support.h`.
+#[cfg(target_arch = "aarch64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct KernelStat {
+    /// Device containing the file.
+    pub st_dev: u64,
+    /// File inode number.
+    pub st_ino: u64,
+    /// File mode bits.
+    pub st_mode: c_uint,
+    /// Number of hard links.
+    pub st_nlink: c_uint,
+    /// File owner user id.
+    pub st_uid: c_uint,
+    /// File owner group id.
+    pub st_gid: c_uint,
+    /// Device id for special files.
+    pub st_rdev: u64,
+    /// Kernel padding after rdev.
+    pub __pad1: u64,
+    /// Total file size in bytes.
+    pub st_size: i64,
+    /// Preferred block size for IO.
+    pub st_blksize: i32,
+    /// Kernel padding after blksize.
+    pub __pad2: i32,
+    /// Number of allocated 512-byte blocks.
+    pub st_blocks: i64,
+    /// Last access time, seconds.
+    pub st_atime: i64,
+    /// Last access time, nanoseconds.
+    pub st_atime_nsec: u64,
+    /// Last modification time, seconds.
+    pub st_mtime: i64,
+    /// Last modification time, nanoseconds.
+    pub st_mtime_nsec: u64,
+    /// Last status change time, seconds.
+    pub st_ctime: i64,
+    /// Last status change time, nanoseconds.
+    pub st_ctime_nsec: u64,
+    /// Reserved kernel padding.
+    pub __unused4: u32,
+    /// Reserved kernel padding.
+    pub __unused5: u32,
+}
+
 impl KernelStat {
     /// A zeroed stat buffer suitable for passing to `fstat`/`stat`.
     pub const fn zeroed() -> Self {
@@ -66,6 +118,7 @@ impl KernelStat {
 /// with exactly this struct, and the thread-enumeration loop only reads
 /// `d_ino`/`d_reclen`/`d_name`. The faithful port follows the source's legacy
 /// `getdents` usage; revisit if 64-bit `d_off` is needed.
+#[cfg(target_arch = "x86_64")]
 #[repr(C)]
 pub struct KernelDirent {
     /// Directory entry inode.
@@ -74,6 +127,26 @@ pub struct KernelDirent {
     pub d_off: i64,
     /// Record length in bytes.
     pub d_reclen: c_ushort,
+    /// NUL-terminated directory entry name.
+    pub d_name: [u8; 256],
+}
+
+/// `struct linux_dirent64` for aarch64 - the `getdents64` layout (aarch64 has no
+/// legacy `getdents`). Identical to the x86_64 legacy struct except for a
+/// `d_type` byte inserted before `d_name`, which shifts `d_name` from offset 18
+/// to 19. The thread-enumeration loop still only reads `d_ino`/`d_reclen`/
+/// `d_name`, all of which this layout provides at the correct offsets.
+#[cfg(target_arch = "aarch64")]
+#[repr(C)]
+pub struct KernelDirent {
+    /// Directory entry inode.
+    pub d_ino: i64,
+    /// Offset to the next directory entry.
+    pub d_off: i64,
+    /// Record length in bytes.
+    pub d_reclen: c_ushort,
+    /// File type byte (`getdents64` only; absent from legacy `getdents`).
+    pub d_type: u8,
     /// NUL-terminated directory entry name.
     pub d_name: [u8; 256],
 }
@@ -187,21 +260,45 @@ pub struct KernelMsghdr {
 const _: () = {
     use mem::{align_of, offset_of, size_of};
 
-    assert!(size_of::<KernelStat>() == 144);
+    // KernelStat layout is arch-specific. Shared anchors:
     assert!(align_of::<KernelStat>() == 8);
     assert!(offset_of!(KernelStat, st_dev) == 0);
     assert!(offset_of!(KernelStat, st_ino) == 8);
-    assert!(offset_of!(KernelStat, st_nlink) == 16);
-    assert!(offset_of!(KernelStat, st_mode) == 24);
-    assert!(offset_of!(KernelStat, st_size) == 48);
-    assert!(offset_of!(KernelStat, st_blocks) == 64);
+    #[cfg(target_arch = "x86_64")]
+    {
+        assert!(size_of::<KernelStat>() == 144);
+        assert!(offset_of!(KernelStat, st_nlink) == 16);
+        assert!(offset_of!(KernelStat, st_mode) == 24);
+        assert!(offset_of!(KernelStat, st_size) == 48);
+        assert!(offset_of!(KernelStat, st_blocks) == 64);
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        assert!(size_of::<KernelStat>() == 128);
+        assert!(offset_of!(KernelStat, st_mode) == 16);
+        assert!(offset_of!(KernelStat, st_nlink) == 20);
+        assert!(offset_of!(KernelStat, st_size) == 48);
+        assert!(offset_of!(KernelStat, st_blocks) == 64);
+    }
 
-    assert!(size_of::<KernelDirent>() == 280);
-    assert!(align_of::<KernelDirent>() == 8);
+    // KernelDirent layout is arch-specific: legacy `getdents` on x86_64
+    // (d_name at 18), `getdents64`/`linux_dirent64` on aarch64 (d_type byte
+    // pushes d_name to 19). Shared offsets (d_ino/d_off/d_reclen) match.
     assert!(offset_of!(KernelDirent, d_ino) == 0);
     assert!(offset_of!(KernelDirent, d_off) == 8);
     assert!(offset_of!(KernelDirent, d_reclen) == 16);
-    assert!(offset_of!(KernelDirent, d_name) == 18);
+    #[cfg(target_arch = "x86_64")]
+    {
+        assert!(size_of::<KernelDirent>() == 280);
+        assert!(align_of::<KernelDirent>() == 8);
+        assert!(offset_of!(KernelDirent, d_name) == 18);
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        assert!(align_of::<KernelDirent>() == 8);
+        assert!(offset_of!(KernelDirent, d_type) == 18);
+        assert!(offset_of!(KernelDirent, d_name) == 19);
+    }
 
     assert!(size_of::<KernelSigset>() == 8);
     assert!(size_of::<KernelIovec>() == 16);

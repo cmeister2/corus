@@ -18,13 +18,14 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 #[cfg_attr(target_arch = "x86_64", path = "arch/x86_64.rs")]
+#[cfg_attr(target_arch = "aarch64", path = "arch/aarch64.rs")]
 pub mod arch;
 
 // Fail loudly on an unsupported target rather than compiling an empty `arch`
 // module (which would surface as a flood of confusing "not found in `arch`"
-// errors). aarch64 slots in here when `arch/aarch64.rs` lands.
-#[cfg(not(target_arch = "x86_64"))]
-compile_error!("corus-syscall currently supports x86_64 only");
+// errors).
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+compile_error!("corus-syscall supports x86_64 and aarch64 only");
 
 pub mod kernel_types;
 pub mod linux;

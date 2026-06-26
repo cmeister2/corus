@@ -182,6 +182,11 @@ pub struct Nhdr {
     pub n_type: u32,
 }
 
+/// AUXV `a_type` for the kernel page size (`AT_PAGESZ`). Used to obtain the
+/// real runtime page size, which on aarch64 is not a compile-time constant
+/// (kernels ship 4K/16K/64K).
+pub const AT_PAGESZ: u64 = 6;
+
 /// `Elf64_auxv_t` (golden: size 16, align 8).
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -197,6 +202,7 @@ pub struct AuxvT {
 /// x86_64 general-purpose registers - `i386_regs` for `__x86_64__`
 /// (golden: size 216, align 8). Matches the kernel `user_regs_struct` order
 /// that `PTRACE_GETREGS` fills.
+#[cfg(target_arch = "x86_64")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Regs {
@@ -256,8 +262,27 @@ pub struct Regs {
     pub gs: u64,
 }
 
+/// aarch64 general-purpose registers - the kernel `user_regs_struct`
+/// (`struct user_pt_regs`, golden: size 272, align 8) that
+/// `PTRACE_GETREGSET`+`NT_PRSTATUS` fills. This is also the `arm64_regs` shape
+/// in the original coredumper's `elfcore.h`.
+#[cfg(target_arch = "aarch64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Regs {
+    /// General-purpose registers x0..x30 (x30 is the link register).
+    pub regs: [u64; 31],
+    /// Stack pointer.
+    pub sp: u64,
+    /// Program counter.
+    pub pc: u64,
+    /// Processor state (NZCV flags, etc.).
+    pub pstate: u64,
+}
+
 /// x86_64 FPU/SSE registers - `fpregs` (golden: size 512, align 4). This is the
 /// `user_fpregs_struct` that `PTRACE_GETFPREGS` fills.
+#[cfg(target_arch = "x86_64")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct FpRegs {
@@ -287,6 +312,20 @@ pub struct FpRegs {
     pub xmm_space: [u32; 64],
     /// Reserved kernel padding.
     pub padding: [u32; 24],
+}
+
+/// aarch64 FP/SIMD registers - the kernel `user_fpsimd_state`
+/// (golden: size 528, align 16) that `PTRACE_GETREGSET`+`NT_FPREGSET` fills.
+#[cfg(target_arch = "aarch64")]
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+pub struct FpRegs {
+    /// SIMD/FP registers v0..v31 (128-bit each).
+    pub vregs: [u128; 32],
+    /// Floating-point status register.
+    pub fpsr: u32,
+    /// Floating-point control register.
+    pub fpcr: u32,
 }
 
 /// `elf_timeval` (golden: size 16, align 8).
@@ -380,6 +419,7 @@ pub struct Prpsinfo {
 /// `core_user` - the NT_PRXREG / NT_TASKSTRUCT note payload (the kernel `user`
 /// struct, golden: size 928 on x86_64). gdb reads `regs`/`fpregs` here as a
 /// fallback; the C fills the rest via `PTRACE_PEEKUSER` then overwrites `regs`.
+#[cfg(target_arch = "x86_64")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct CoreUser {
@@ -417,6 +457,46 @@ pub struct CoreUser {
     pub error_code: c_ulong,
     /// Faulting address.
     pub fault_address: c_ulong,
+}
+
+/// `core_user` - the NT_PRXREG note payload on aarch64. Matches the original
+/// coredumper `core_user` layout for `__aarch64__`: no `error_code`/
+/// `fault_address`; instead the FP registers and an `fpregs_ptr` follow the
+/// debug registers (see `elfcore.c`).
+#[cfg(target_arch = "aarch64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CoreUser {
+    /// General-purpose register snapshot.
+    pub regs: Regs,
+    /// Nonzero if floating-point registers are valid.
+    pub fpvalid: c_ulong,
+    /// Text segment size.
+    pub tsize: c_ulong,
+    /// Data segment size.
+    pub dsize: c_ulong,
+    /// Stack segment size.
+    pub ssize: c_ulong,
+    /// Text segment start address.
+    pub start_code: c_ulong,
+    /// Stack start address.
+    pub start_stack: c_ulong,
+    /// Signal value.
+    pub signal: c_ulong,
+    /// Reserved word.
+    pub reserved: c_ulong,
+    /// Pointer to the register block.
+    pub regs_ptr: *mut Regs,
+    /// Kernel user-struct magic value.
+    pub magic: c_ulong,
+    /// Command name.
+    pub comm: [c_char; 32],
+    /// Debug registers.
+    pub debugreg: [c_ulong; 8],
+    /// Floating-point/SIMD register snapshot.
+    pub fpregs: FpRegs,
+    /// Pointer to the floating-point register block.
+    pub fpregs_ptr: *mut FpRegs,
 }
 
 impl Ehdr {
