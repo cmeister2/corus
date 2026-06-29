@@ -17,7 +17,7 @@ readme = "README.md"
 [dev-dependencies]
 # libc is used ONLY by tests for differential validation of the asm! wrappers.
 # It must never be linked into the library itself.
-libc = "0.2"
+libc = "=0.2.186"
 
 [lints.rust]
 missing_docs = "deny"
