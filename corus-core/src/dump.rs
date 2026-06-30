@@ -45,12 +45,12 @@
 //!   On `fork` failure the dump falls back to the in-line frozen write, so
 //!   correctness is preserved even though the latency win is not.
 
-use core::ffi::{c_int, c_void};
+use core::ffi::{c_char, c_int, c_void};
 use core::mem::{self, MaybeUninit};
 use core::ptr;
 use core::slice;
 
-use corus_syscall::{arch::PAGE_SIZE, linux::O_RDONLY, sys};
+use corus_syscall::{arch, arch::PAGE_SIZE, linux::O_RDONLY, sys};
 
 use crate::elf::{AuxvT, CoreUser, FpRegs, Prpsinfo, Regs};
 use crate::elfcore::{CoreInputs, CreateElfCoreError, ThreadState};
@@ -325,14 +325,24 @@ pub unsafe fn capture_dump(
     for (i, &pid) in pids.iter().take(n_threads).enumerate() {
         let mut regs: Regs = unsafe { mem::zeroed() };
         let mut fpregs: FpRegs = unsafe { mem::zeroed() };
-        if let Err(errno) =
-            unsafe { sys::ptrace_getregs(pid, &mut regs as *mut Regs as *mut c_void) }
-        {
+        if let Err(errno) = unsafe {
+            arch::ptrace_get_gpregs(
+                pid,
+                &mut regs as *mut Regs as *mut c_void,
+                mem::size_of::<Regs>(),
+            )
+        } {
             return Err(DumpError::PtraceGetRegs { pid, errno });
         }
 
         // FP registers are best-effort: a failure leaves them zeroed.
-        let _ = unsafe { sys::ptrace_getfpregs(pid, &mut fpregs as *mut FpRegs as *mut c_void) };
+        let _ = unsafe {
+            arch::ptrace_get_fpregs(
+                pid,
+                &mut fpregs as *mut FpRegs as *mut c_void,
+                mem::size_of::<FpRegs>(),
+            )
+        };
 
         // FRAME() override: for the thread that called the public API, replace
         // the ptrace-captured regs (parked in wait4) with the caller's snapshot
@@ -341,10 +351,20 @@ pub unsafe fn capture_dump(
         if let Some((frame_tid, frame_regs)) = opts.frame
             && pid == frame_tid
         {
-            let mut fr = frame_regs;
-            fr.fs_base = regs.fs_base;
-            fr.gs_base = regs.gs_base;
-            regs = fr;
+            // x86_64 keeps the kernel-only segment bases from ptrace, which
+            // capture_frame() cannot read. aarch64 has no such registers, so
+            // the captured frame is used as-is.
+            #[cfg(target_arch = "x86_64")]
+            {
+                let mut fr = frame_regs;
+                fr.fs_base = regs.fs_base;
+                fr.gs_base = regs.gs_base;
+                regs = fr;
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                regs = frame_regs;
+            }
         }
 
         cap.threads[i] = ThreadState { pid, regs, fpregs };
@@ -386,7 +406,20 @@ pub unsafe fn serialize_dump(
     cap: &CapturedDump,
     opts: &DumpOptions,
 ) -> Result<(), DumpError> {
-    let pagesize = PAGE_SIZE;
+    // The page size must be the *runtime* kernel page size. On x86_64 that is
+    // always 4K, but aarch64 kernels ship 4K/16K/64K, so we cannot use the
+    // compile-time `PAGE_SIZE` (its aarch64 value is only a conservative
+    // fallback). Read it from AT_PAGESZ in the captured auxv; fall back to
+    // `PAGE_SIZE` if the entry is missing or implausible. A wrong page size here
+    // miscomputes the leading-zero skip and underflows mapping sizes.
+    let pagesize = cap
+        .auxv
+        .iter()
+        .take(cap.n_auxv)
+        .find(|e| e.a_type == crate::elf::AT_PAGESZ)
+        .map(|e| e.a_val as usize)
+        .filter(|&p| p.is_power_of_two())
+        .unwrap_or(PAGE_SIZE);
 
     // --- Memory mappings ---
     let mut maps = mapping_buf();
@@ -532,7 +565,7 @@ fn read_auxv(out: &mut [AuxvT]) -> Result<usize, i32> {
 /// the PRPSINFO-building block in `InternalGetCoreDump`.
 fn build_prpsinfo(main_pid: i32) -> Prpsinfo {
     let mut info: Prpsinfo = unsafe { mem::zeroed() };
-    info.pr_sname = b'R' as i8;
+    info.pr_sname = b'R' as c_char;
     info.pr_nice = sys::getpriority(PRIO_PROCESS, 0)
         .map(|v| v as i8)
         .unwrap_or(0);
@@ -547,7 +580,7 @@ fn build_prpsinfo(main_pid: i32) -> Prpsinfo {
     let size = unsafe {
         sys::readlink(
             c"/proc/self/exe".as_ptr(),
-            exe.as_mut_ptr() as *mut i8,
+            exe.as_mut_ptr() as *mut c_char,
             exe.len(),
         )
     }
@@ -560,7 +593,7 @@ fn build_prpsinfo(main_pid: i32) -> Prpsinfo {
         };
         let cap = base.len().min(info.pr_fname.len());
         for (dst, &b) in info.pr_fname.iter_mut().zip(base.iter()).take(cap) {
-            *dst = b as i8;
+            *dst = b as c_char;
         }
     }
 
@@ -570,7 +603,7 @@ fn build_prpsinfo(main_pid: i32) -> Prpsinfo {
         let mut buf = [0u8; 80]; // pr_psargs is 80 bytes
         if let Ok(rd) = unsafe { sys::read(fd, buf.as_mut_ptr() as *mut c_void, buf.len()) } {
             for (dst, &b) in info.pr_psargs.iter_mut().zip(buf.iter()).take(rd) {
-                *dst = if b == 0 { b' ' as i8 } else { b as i8 };
+                *dst = if b == 0 { b' ' as c_char } else { b as c_char };
             }
         }
         sys::close(fd).ok();

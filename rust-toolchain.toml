@@ -2,4 +2,4 @@
 # Stock stable Rust; no build-std.
 channel = "stable"
 components = ["rustfmt", "clippy"]
-targets = ["x86_64-unknown-linux-gnu"]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]

@@ -22,7 +22,7 @@
 //!   than silently truncating (logged via the error return).
 //! - **Callback**: a C-ABI fn pointer + context pointer rather than varargs.
 
-use core::ffi::{c_int, c_void};
+use core::ffi::{c_char, c_int, c_void};
 use core::sync::atomic::{AtomicI32, AtomicPtr, AtomicUsize, Ordering};
 use core::{mem, ptr};
 
@@ -30,7 +30,7 @@ use corus_syscall::arch::PAGE_SIZE;
 use corus_syscall::kernel_types::{
     KernelDirent, KernelSigaction, KernelSigset, KernelStat, StackT,
 };
-use corus_syscall::linux::{ECHILD, EFAULT, EINTR, ENOMEM, EPERM, O_RDONLY};
+use corus_syscall::linux::{ECHILD, EFAULT, EINTR, ENOMEM, EPERM, O_DIRECTORY, O_RDONLY};
 use corus_syscall::{clone, sys};
 
 // --- Lister crash-cleanup signal state ---------------------------------------
@@ -158,9 +158,7 @@ pub const MAX_THREADS: usize = 4096;
 pub type ThreadCallback =
     extern "C" fn(param: *mut c_void, pids: *const c_int, num: c_int) -> c_int;
 
-// Linux constants (x86_64) used here.
-/// `open(2)` directory-only flag.
-const O_DIRECTORY: c_int = 0o200000;
+// Linux constants used here.
 /// Local/Unix socket protocol family.
 const PF_LOCAL: c_int = 1;
 /// Datagram socket type.
@@ -249,7 +247,7 @@ fn local_atoi(s: &[u8]) -> i32 {
 /// `open(2)` that retries on EINTR. Port of `c_open`.
 fn c_open(path: &[u8], flags: c_int) -> sys::SysResult {
     loop {
-        match unsafe { sys::open(path.as_ptr() as *const i8, flags, 0) } {
+        match unsafe { sys::open(path.as_ptr() as *const c_char, flags, 0) } {
             Err(EINTR) => continue,
             other => return other,
         }
@@ -330,7 +328,8 @@ extern "C" fn lister_thread(arg: *mut c_void) -> c_int {
     let mut marker_sb = KernelStat::zeroed();
     // SAFETY: marker_name is NUL? No - build a NUL-terminated copy.
     let marker_cstr = nul_terminate(&marker_name, mlen);
-    if let Err(errno) = unsafe { sys::stat(marker_cstr.as_ptr() as *const i8, &mut marker_sb) } {
+    if let Err(errno) = unsafe { sys::stat(marker_cstr.as_ptr() as *const c_char, &mut marker_sb) }
+    {
         let _ = sys::close(marker);
         return fail(params, errno);
     }
@@ -519,6 +518,39 @@ fn fail(params: &mut ListerParams, err: i32) -> c_int {
     1
 }
 
+/// Decode the lister's wait status into the shared parameter block.
+fn decode_lister_status(status: c_int, params: &mut ListerParams) {
+    // Unlike the original C, exit code 1 means fail() already stored a precise
+    // errno in the shared parameter block; keep that diagnostic intact.
+    if status & 0x7f == 0 {
+        // WIFEXITED
+        match (status >> 8) & 0xff {
+            0 => {}
+            1 => {
+                if params.err == 0 {
+                    params.err = ECHILD;
+                }
+                params.result = -1;
+            }
+            2 => {
+                params.err = EFAULT;
+                params.result = -1;
+            }
+            3 => {
+                params.err = EPERM; // already traced
+                params.result = -1;
+            }
+            _ => {
+                params.err = ECHILD;
+                params.result = -1;
+            }
+        }
+    } else {
+        params.err = EFAULT; // killed by signal
+        params.result = -1;
+    }
+}
+
 /// PTRACE_ATTACH + wait + PEEKDATA verification that the tracee truly shares our
 /// address space. Returns true if the thread is now attached and verified.
 fn attach_and_verify(pid: c_int) -> bool {
@@ -587,7 +619,7 @@ fn thread_shares_address_space(tid: c_int, marker: c_int, marker_sb: &KernelStat
     len += build_path(&mut path[len..], &[b"/fd/"], Some(marker));
     let cstr = nul_terminate(&path, len);
     let mut sb = KernelStat::zeroed();
-    if unsafe { sys::stat(cstr.as_ptr() as *const i8, &mut sb) }.is_err() {
+    if unsafe { sys::stat(cstr.as_ptr() as *const c_char, &mut sb) }.is_err() {
         return false;
     }
     sb.st_ino == marker_sb.st_ino
@@ -707,28 +739,7 @@ pub unsafe fn list_all_process_threads(
                     }
                 }
             }
-            // Decode exit status into the C error mapping.
-            if status & 0x7f == 0 {
-                // WIFEXITED
-                match (status >> 8) & 0xff {
-                    0 => {}
-                    2 => {
-                        params.err = EFAULT;
-                        params.result = -1;
-                    }
-                    3 => {
-                        params.err = EPERM; // already traced
-                        params.result = -1;
-                    }
-                    _ => {
-                        params.err = ECHILD;
-                        params.result = -1;
-                    }
-                }
-            } else {
-                params.err = EFAULT; // killed by signal
-                params.result = -1;
-            }
+            decode_lister_status(status, &mut params);
         }
     }
 
@@ -847,6 +858,19 @@ pub unsafe fn with_mmap_stack(
 mod tests {
     use super::*;
 
+    extern "C" fn unused_callback(_param: *mut c_void, _pids: *const c_int, _num: c_int) -> c_int {
+        0
+    }
+
+    fn test_params(result: c_int, err: i32) -> ListerParams {
+        ListerParams {
+            result,
+            err,
+            callback: unused_callback,
+            parameter: ptr::null_mut(),
+        }
+    }
+
     #[test]
     fn itoa_roundtrips() {
         let mut buf = [0u8; 16];
@@ -872,5 +896,51 @@ mod tests {
         assert_eq!(parse_tid(b".5678\0"), Some(5678));
         assert_eq!(parse_tid(b"cgroup\0"), None);
         assert_eq!(parse_tid(b"\0"), None);
+    }
+
+    #[test]
+    fn lister_status_exit_1_preserves_recorded_errno() {
+        // Exit code 1 is the lister's fail() path: the precise errno was
+        // already written into shared ListerParams and must not be replaced by
+        // the parent's generic ECHILD fallback.
+        let mut params = test_params(-1, corus_syscall::linux::EINVAL);
+
+        decode_lister_status(1 << 8, &mut params);
+
+        assert_eq!(params.result, -1);
+        assert_eq!(params.err, corus_syscall::linux::EINVAL);
+    }
+
+    #[test]
+    fn lister_status_exit_1_with_zero_errno_falls_back_to_echild() {
+        // A zero errno on the fail() path would be malformed, but still report
+        // a real failure errno rather than returning a failure with errno 0.
+        let mut params = test_params(0, 0);
+
+        decode_lister_status(1 << 8, &mut params);
+
+        assert_eq!(params.result, -1);
+        assert_eq!(params.err, ECHILD);
+    }
+
+    #[test]
+    fn lister_status_keeps_existing_coarse_mappings() {
+        // The errno-preservation fix is only for fail()'s exit code 1. The
+        // special parent-owned mappings for fault cleanup, already-traced, and
+        // signal death must stay coarse and unchanged.
+        let mut fault_params = test_params(0, 0);
+        decode_lister_status(2 << 8, &mut fault_params);
+        assert_eq!(fault_params.result, -1);
+        assert_eq!(fault_params.err, EFAULT);
+
+        let mut traced_params = test_params(0, 0);
+        decode_lister_status(3 << 8, &mut traced_params);
+        assert_eq!(traced_params.result, -1);
+        assert_eq!(traced_params.err, EPERM);
+
+        let mut signal_params = test_params(0, 0);
+        decode_lister_status(SIGSEGV, &mut signal_params);
+        assert_eq!(signal_params.result, -1);
+        assert_eq!(signal_params.err, EFAULT);
     }
 }

@@ -46,6 +46,16 @@ pub const ET_CORE: u16 = 4;
 // e_machine
 /// ELF machine value for x86_64.
 pub const EM_X86_64: u16 = 62;
+/// ELF machine value for aarch64 (ARM64).
+pub const EM_AARCH64: u16 = 183;
+
+/// The `e_machine` value for the architecture this build targets. Set into the
+/// core file's ELF header so debuggers identify the dump's ISA correctly.
+#[cfg(target_arch = "x86_64")]
+pub const ELF_MACHINE: u16 = EM_X86_64;
+/// The `e_machine` value for the architecture this build targets.
+#[cfg(target_arch = "aarch64")]
+pub const ELF_MACHINE: u16 = EM_AARCH64;
 
 // Program header p_type
 /// Program header type for loadable segments.
@@ -172,6 +182,11 @@ pub struct Nhdr {
     pub n_type: u32,
 }
 
+/// AUXV `a_type` for the kernel page size (`AT_PAGESZ`). Used to obtain the
+/// real runtime page size, which on aarch64 is not a compile-time constant
+/// (kernels ship 4K/16K/64K).
+pub const AT_PAGESZ: u64 = 6;
+
 /// `Elf64_auxv_t` (golden: size 16, align 8).
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -187,6 +202,7 @@ pub struct AuxvT {
 /// x86_64 general-purpose registers - `i386_regs` for `__x86_64__`
 /// (golden: size 216, align 8). Matches the kernel `user_regs_struct` order
 /// that `PTRACE_GETREGS` fills.
+#[cfg(target_arch = "x86_64")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Regs {
@@ -246,8 +262,27 @@ pub struct Regs {
     pub gs: u64,
 }
 
+/// aarch64 general-purpose registers - the kernel `user_regs_struct`
+/// (`struct user_pt_regs`, golden: size 272, align 8) that
+/// `PTRACE_GETREGSET`+`NT_PRSTATUS` fills. This is also the `arm64_regs` shape
+/// in the original coredumper's `elfcore.h`.
+#[cfg(target_arch = "aarch64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Regs {
+    /// General-purpose registers x0..x30 (x30 is the link register).
+    pub regs: [u64; 31],
+    /// Stack pointer.
+    pub sp: u64,
+    /// Program counter.
+    pub pc: u64,
+    /// Processor state (NZCV flags, etc.).
+    pub pstate: u64,
+}
+
 /// x86_64 FPU/SSE registers - `fpregs` (golden: size 512, align 4). This is the
 /// `user_fpregs_struct` that `PTRACE_GETFPREGS` fills.
+#[cfg(target_arch = "x86_64")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct FpRegs {
@@ -277,6 +312,20 @@ pub struct FpRegs {
     pub xmm_space: [u32; 64],
     /// Reserved kernel padding.
     pub padding: [u32; 24],
+}
+
+/// aarch64 FP/SIMD registers - the kernel `user_fpsimd_state`
+/// (golden: size 528, align 16) that `PTRACE_GETREGSET`+`NT_FPREGSET` fills.
+#[cfg(target_arch = "aarch64")]
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+pub struct FpRegs {
+    /// SIMD/FP registers v0..v31 (128-bit each).
+    pub vregs: [u128; 32],
+    /// Floating-point status register.
+    pub fpsr: u32,
+    /// Floating-point control register.
+    pub fpcr: u32,
 }
 
 /// `elf_timeval` (golden: size 16, align 8).
@@ -370,6 +419,7 @@ pub struct Prpsinfo {
 /// `core_user` - the NT_PRXREG / NT_TASKSTRUCT note payload (the kernel `user`
 /// struct, golden: size 928 on x86_64). gdb reads `regs`/`fpregs` here as a
 /// fallback; the C fills the rest via `PTRACE_PEEKUSER` then overwrites `regs`.
+#[cfg(target_arch = "x86_64")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct CoreUser {
@@ -409,6 +459,46 @@ pub struct CoreUser {
     pub fault_address: c_ulong,
 }
 
+/// `core_user` - the NT_PRXREG note payload on aarch64. Matches the original
+/// coredumper `core_user` layout for `__aarch64__`: no `error_code`/
+/// `fault_address`; instead the FP registers and an `fpregs_ptr` follow the
+/// debug registers (see `elfcore.c`).
+#[cfg(target_arch = "aarch64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CoreUser {
+    /// General-purpose register snapshot.
+    pub regs: Regs,
+    /// Nonzero if floating-point registers are valid.
+    pub fpvalid: c_ulong,
+    /// Text segment size.
+    pub tsize: c_ulong,
+    /// Data segment size.
+    pub dsize: c_ulong,
+    /// Stack segment size.
+    pub ssize: c_ulong,
+    /// Text segment start address.
+    pub start_code: c_ulong,
+    /// Stack start address.
+    pub start_stack: c_ulong,
+    /// Signal value.
+    pub signal: c_ulong,
+    /// Reserved word.
+    pub reserved: c_ulong,
+    /// Pointer to the register block.
+    pub regs_ptr: *mut Regs,
+    /// Kernel user-struct magic value.
+    pub magic: c_ulong,
+    /// Command name.
+    pub comm: [c_char; 32],
+    /// Debug registers.
+    pub debugreg: [c_ulong; 8],
+    /// Floating-point/SIMD register snapshot.
+    pub fpregs: FpRegs,
+    /// Pointer to the floating-point register block.
+    pub fpregs_ptr: *mut FpRegs,
+}
+
 impl Ehdr {
     /// A zeroed Ehdr with the x86_64 core-file `e_ident` filled in and the
     /// fixed `e_*size`/version fields set. Caller fills `e_phoff`/`e_phnum`/etc.
@@ -421,7 +511,7 @@ impl Ehdr {
         e.e_ident[EI_VERSION] = EV_CURRENT;
         e.e_ident[EI_OSABI] = ELFOSABI_SYSV;
         e.e_type = ET_CORE;
-        e.e_machine = EM_X86_64;
+        e.e_machine = ELF_MACHINE;
         e.e_version = EV_CURRENT as u32;
         e.e_ehsize = mem::size_of::<Ehdr>() as u16;
         e.e_phentsize = mem::size_of::<Phdr>() as u16;
@@ -547,7 +637,25 @@ const _: () = {
 
     assert!(size_of::<AuxvT>() == 16 && align_of::<AuxvT>() == 8);
 
-    // Register / note payloads
+    assert!(size_of::<ElfTimeval>() == 16 && align_of::<ElfTimeval>() == 8);
+    assert!(size_of::<ElfSiginfo>() == 12 && align_of::<ElfSiginfo>() == 4);
+
+    // Prpsinfo is arch-neutral (no register fields).
+    assert!(size_of::<Prpsinfo>() == 136 && align_of::<Prpsinfo>() == 8);
+    assert!(offset_of!(Prpsinfo, pr_flag) == 8);
+    assert!(offset_of!(Prpsinfo, pr_uid) == 16);
+    assert!(offset_of!(Prpsinfo, pr_pid) == 24);
+    assert!(offset_of!(Prpsinfo, pr_fname) == 40);
+    assert!(offset_of!(Prpsinfo, pr_psargs) == 56);
+};
+
+// Register/note payloads whose size depends on the target's register file.
+// `Regs`/`FpRegs` (and thus `Prstatus`/`CoreUser`, which embed them) are
+// arch-specific; each arch asserts its own golden layout from the C ABI.
+#[cfg(target_arch = "x86_64")]
+const _: () = {
+    use mem::{align_of, offset_of, size_of};
+
     assert!(size_of::<Regs>() == 216 && align_of::<Regs>() == 8);
     assert!(offset_of!(Regs, r15) == 0);
     assert!(offset_of!(Regs, rip) == 128);
@@ -559,22 +667,12 @@ const _: () = {
     assert!(offset_of!(FpRegs, st_space) == 32);
     assert!(offset_of!(FpRegs, xmm_space) == 160);
 
-    assert!(size_of::<ElfTimeval>() == 16 && align_of::<ElfTimeval>() == 8);
-    assert!(size_of::<ElfSiginfo>() == 12 && align_of::<ElfSiginfo>() == 4);
-
     assert!(size_of::<Prstatus>() == 336 && align_of::<Prstatus>() == 8);
     assert!(offset_of!(Prstatus, pr_info) == 0);
     assert!(offset_of!(Prstatus, pr_cursig) == 12);
     assert!(offset_of!(Prstatus, pr_pid) == 32);
     assert!(offset_of!(Prstatus, pr_reg) == 112);
     assert!(offset_of!(Prstatus, pr_fpvalid) == 328);
-
-    assert!(size_of::<Prpsinfo>() == 136 && align_of::<Prpsinfo>() == 8);
-    assert!(offset_of!(Prpsinfo, pr_flag) == 8);
-    assert!(offset_of!(Prpsinfo, pr_uid) == 16);
-    assert!(offset_of!(Prpsinfo, pr_pid) == 24);
-    assert!(offset_of!(Prpsinfo, pr_fname) == 40);
-    assert!(offset_of!(Prpsinfo, pr_psargs) == 56);
 
     assert!(size_of::<CoreUser>() == 928 && align_of::<CoreUser>() == 8);
     assert!(offset_of!(CoreUser, regs) == 0);

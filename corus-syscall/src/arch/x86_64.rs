@@ -456,3 +456,59 @@ pub unsafe extern "C" fn capture_frame(out: *mut u64) {
         "ret",
     )
 }
+
+// --- ptrace register capture (arch-specific request shape) -------------------
+//
+// x86_64 fills the whole register set in one call via PTRACE_GETREGS /
+// PTRACE_GETFPREGS, with `data` pointing at the output buffer and `addr`
+// ignored. Other arches (e.g. aarch64) have no GETREGS and must use
+// PTRACE_GETREGSET with an iovec + note-type selector, so register capture
+// lives behind the arch boundary rather than in the generic `sys` layer.
+
+/// `PTRACE_GETREGS` request number.
+const PTRACE_GETREGS: usize = 12;
+/// `PTRACE_GETFPREGS` request number.
+const PTRACE_GETFPREGS: usize = 14;
+
+/// Fill `out` (a `Regs`-shaped buffer) with the stopped tracee's
+/// general-purpose registers.
+///
+/// # Errors
+/// Returns the kernel errno if the ptrace request fails.
+///
+/// # Safety
+/// `out` must point to a buffer at least the size of the kernel's
+/// `user_regs_struct` (the caller's `Regs`). The tracee must be ptrace-stopped.
+///
+/// `out_len` is accepted for signature parity with aarch64 (whose
+/// `PTRACE_GETREGSET` needs the buffer length in an iovec); x86_64's
+/// `PTRACE_GETREGS` fills a fixed-size buffer and ignores it.
+#[inline]
+pub unsafe fn ptrace_get_gpregs(
+    pid: i32,
+    out: *mut core::ffi::c_void,
+    _out_len: usize,
+) -> Result<usize, i32> {
+    // addr ignored on x86_64; data points at the output buffer.
+    crate::from_ret(unsafe { syscall4(nr::PTRACE, PTRACE_GETREGS, pid as usize, 0, out as usize) })
+}
+
+/// Fill `out` (an `FpRegs`-shaped buffer) with the stopped tracee's FPU/SSE
+/// registers.
+///
+/// # Errors
+/// Returns the kernel errno if the ptrace request fails.
+///
+/// # Safety
+/// `out` must point to a buffer at least the size of the kernel's
+/// `user_fpregs_struct` (the caller's `FpRegs`). The tracee must be stopped.
+#[inline]
+pub unsafe fn ptrace_get_fpregs(
+    pid: i32,
+    out: *mut core::ffi::c_void,
+    _out_len: usize,
+) -> Result<usize, i32> {
+    crate::from_ret(unsafe {
+        syscall4(nr::PTRACE, PTRACE_GETFPREGS, pid as usize, 0, out as usize)
+    })
+}

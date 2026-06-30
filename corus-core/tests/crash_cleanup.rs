@@ -22,8 +22,15 @@ extern "C" fn crashing_callback(_p: *mut c_void, _pids: *const c_int, _n: c_int)
     // the lister. Use inline asm so no Rust UB-precondition check fires first
     // (we *want* the hardware fault, which the crash handler then catches).
     unsafe {
+        #[cfg(target_arch = "x86_64")]
         core::arch::asm!(
             "mov qword ptr [{p}], 0",
+            p = in(reg) 0x8usize, // aligned, unmapped low address
+            options(nostack),
+        );
+        #[cfg(target_arch = "aarch64")]
+        core::arch::asm!(
+            "str xzr, [{p}]",
             p = in(reg) 0x8usize, // aligned, unmapped low address
             options(nostack),
         );

@@ -25,9 +25,19 @@ fn assemble_core_from_self_maps() {
     let parsed = parse_self_maps(&mut maps).expect("parse maps");
     assert!(parsed > 0);
 
+    // Use the real kernel page size: this test finalizes *live* /proc/self/maps,
+    // so a wrong page size miscomputes the leading-zero skip and underflows
+    // mapping sizes (aarch64 kernels may use 16K/64K pages, not 4K).
+    let pagesize = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+    assert!(
+        pagesize.is_power_of_two(),
+        "implausible page size {pagesize}"
+    );
+
     let loopback = Pipe::new().expect("pipe");
-    let mut scratch = [0u8; 4096];
-    let kept = unsafe { finalize_mappings(&mut maps, parsed, 4096, &loopback, &mut scratch) };
+    // Scratch must be at least one page; 64K covers every Linux page size.
+    let mut scratch = [0u8; 64 * 1024];
+    let kept = unsafe { finalize_mappings(&mut maps, parsed, pagesize, &loopback, &mut scratch) };
     assert!(kept > 0, "should keep some mappings");
 
     // Synthetic single-thread state.
@@ -49,7 +59,7 @@ fn assemble_core_from_self_maps() {
         main_thread: 0,
         auxv: &auxv,
         mappings: &maps[..kept],
-        pagesize: 4096,
+        pagesize,
         notes: &[],
         user: None,
     };
@@ -63,8 +73,9 @@ fn assemble_core_from_self_maps() {
     let s = String::from_utf8_lossy(&out.stdout);
     let _ = remove_file(&path);
     assert!(s.contains("Core file"), "should be a core file:\n{s}");
-    assert!(
-        s.contains("X86-64") || s.contains("x86-64"),
-        "machine:\n{s}"
-    );
+    #[cfg(target_arch = "x86_64")]
+    let machine_ok = s.contains("X86-64") || s.contains("x86-64");
+    #[cfg(target_arch = "aarch64")]
+    let machine_ok = s.contains("AArch64") || s.contains("aarch64");
+    assert!(machine_ok, "machine:\n{s}");
 }
