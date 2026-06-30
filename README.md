@@ -41,7 +41,7 @@ are attached; the snapshot child disarms this inherited state as its first act.
 
 ## Status
 
-Corus is a working x86_64 Linux Rust port of google-coredumper. It builds as
+Corus is a working x86_64 and aarch64 Linux Rust port of google-coredumper. It builds as
 three crates, exports the original C ABI from the Rust `staticlib`/`cdylib`, and
 also provides an idiomatic Rust builder for common dump requests.
 
@@ -66,7 +66,7 @@ symbol drift guards, and a no-alloc audit for `corus-core`.
 
 Known caveats:
 
-- Linux x86_64 only for now.
+- Linux x86_64 and aarch64.
 - The copy-on-write snapshot changes the meaning of the dump for a few mapping
   kinds: `MAP_SHARED` segments are no longer point-in-time consistent with the
   captured registers (a resumed thread may mutate them before the snapshot reads

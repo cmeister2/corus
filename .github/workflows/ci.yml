@@ -54,6 +54,13 @@ jobs:
       - name: Lister primitives smoke test
         run: cargo run -p corus --example lister_primitives
       - run: make tests
+      - name: Archive C unit test output
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: original-c-unit-output-x86_64
+          path: target/original-c-unit/output.txt
+          if-no-files-found: ignore
 
   cross-aarch64:
     name: Cross-compile (aarch64)
@@ -99,6 +106,13 @@ jobs:
       - name: Lister primitives smoke test
         run: cargo run -p corus --example lister_primitives
       - run: make tests
+      - name: Archive C unit test output
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: original-c-unit-output-aarch64
+          path: target/original-c-unit/output.txt
+          if-no-files-found: ignore
 
   clippy:
     name: Clippy
