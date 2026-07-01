@@ -19,6 +19,7 @@ name = "corus"
 version = "0.0.0-semantic-release"
 dependencies = [
  "corus-core",
+ "libc",
  "tempfile",
  "which",
 ]
