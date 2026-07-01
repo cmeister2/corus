@@ -32,5 +32,5 @@ pub const O_DIRECTORY: i32 = 0o40000;
 pub const AT_FDCWD: i32 = -100;
 
 /// `*at(2)` flag: do not dereference a symbolic link (for `newfstatat` acting
-/// as `lstat`/`stat` — corus passes 0 to follow links like `stat`).
+/// as `lstat`/`stat` - corus passes 0 to follow links like `stat`).
 pub const AT_SYMLINK_NOFOLLOW: i32 = 0x100;

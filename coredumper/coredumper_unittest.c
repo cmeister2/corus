@@ -656,6 +656,14 @@ static int MyWriteCoreDumpWith(const struct CoreDumpParameters *params,
   flags &= ~(COREDUMPER_FLAG_LIMITED | COREDUMPER_FLAG_LIMITED_BY_PRIORITY);
   SetCoreDumpParameter(&new_params, flags, flags);
   coreFd = GetCoreDumpWith(&new_params);
+  if (coreFd < 0) {
+    fprintf(stderr,
+            "|| INSTR MyWriteCoreDumpWith: GetCoreDumpWith failed "
+            "coreFd=%d errno=%d (%s) max_length=%zu flags=%d note_count=%d\n",
+            coreFd, errno, strerror(errno), max_length, new_params.flags,
+            new_params.note_count);
+    fflush(stderr);
+  }
   if (params->selected_compressor) {
     comp = *params->selected_compressor;
   }
@@ -670,6 +678,12 @@ static int MyWriteCoreDumpWith(const struct CoreDumpParameters *params,
       char extended_file_name[strlen(file_name) + strlen(suffix) + 1];
       strcat(strcpy(extended_file_name, file_name), suffix);
       writeFd = open(extended_file_name, O_WRONLY|O_CREAT|O_TRUNC, 0600);
+      if (writeFd < 0) {
+        fprintf(stderr,
+                "|| INSTR MyWriteCoreDumpWith: open(\"%s\") failed errno=%d (%s)\n",
+                extended_file_name, errno, strerror(errno));
+        fflush(stderr);
+      }
     }
     if (writeFd >= 0) {
       char buffer[16384];
@@ -684,6 +698,11 @@ static int MyWriteCoreDumpWith(const struct CoreDumpParameters *params,
           int i;
           i = write(writeFd, ptr, len);
           if (i <= 0) {
+            fprintf(stderr,
+                    "|| INSTR MyWriteCoreDumpWith: write failed i=%d errno=%d (%s) "
+                    "remaining_len=%zd max_length=%zu\n",
+                    i, errno, strerror(errno), (ssize_t)len, max_length);
+            fflush(stderr);
             rc = -1;
             break;
           }

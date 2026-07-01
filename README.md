@@ -82,10 +82,37 @@ Known caveats:
   original C unit harness can be rejected; the harness validates the marker with
   later unsigned prints instead.
 
+## Why not `elfcore`??
+
+[`microsoft/elfcore`](https://github.com/microsoft/elfcore) is another Rust crate
+that writes ELF core dumps on Linux, so it is worth stating how the two differ.
+The short version:
+
+- Corus dumps the calling process, on demand, while it keeps running
+- elfcore dumps another process from the outside and explicitly refuses to dump itself
+
+| Dimension          | Corus                                                                     | `microsoft/elfcore`                                                      |
+|--------------------|---------------------------------------------------------------------------|--------------------------------------------------------------------------|
+| Who dumps whom     | Self-dump: the process dumps itself, on demand, and keeps running         | External: dumps another PID; hard-errors on self-dump                    |
+| Trigger            | Any call site - crash handler, health check, on-demand snapshot           | A supervising process drives it                                          |
+| Suspend model      | Clone a lister thread, ptrace siblings, fork a COW snapshot, resume early | `PTRACE_SEIZE`+`INTERRUPT` all threads, held stopped for the whole write |
+| Pause duration     | ~proportional to thread count (sub-ms typical)                            | ~proportional to resident memory and output throughput                   |
+| Memory source      | Reads its own COW snapshot via `/proc/self`                               | `process_vm_readv`, falling back to `/proc/<pid>/mem`                    |
+| `std` / deps       | `no_std`, alloc-free, libc-free on the dump path                          | Full `std`; `libc`, `nix`, `zerocopy`, `smallvec`, `tracing`             |
+| Source abstraction | Concrete `/proc/self`                                                     | `ProcessInfoSource`/`ReadProcessMemory` traits (can dump VMs)            |
+| Output             | Byte limits, priority trimming, gzip/bzip2/compress pipelines             | Plain `impl Write`; no compression, limits, or trimming                  |
+| C ABI              | Drop-in google-coredumper C ABI                                           | Rust-only                                                                |
+| Notes              | PRPSINFO, per-thread PRSTATUS/PRFPREG, AUXV, NT_FILE, extra               | PRPSINFO, per-thread PRSTATUS/NT_SIGINFO, AUXV, NT_FILE, custom          |
+
+If you need to dump a different process from a supervisor, or a non-process
+source such as a VM guest, elfcore is the better fit. If a process needs to dump
+itself - without relying on a live supervisor, an allocator, or libc - that is
+what Corus is for.
+
 ## Layout
 
-| Crate            | `no_std` | Role                                                                           |
-|------------------|:--------:|--------------------------------------------------------------------------------|
+| Crate           | `no_std` | Role                                                                           |
+|-----------------|:--------:|--------------------------------------------------------------------------------|
 | `corus-syscall` |   yes    | Raw Linux syscalls via hand-written `asm!` (port of `linux_syscall_support.h`) |
 | `corus-core`    |   yes    | The dump engine: ELF build, thread suspend, `/proc` parse                      |
 | `corus`         |    no    | `cdylib`+`staticlib`+`rlib`; C ABI (`capi`) and Rust API (`rust_api`)          |

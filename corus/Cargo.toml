@@ -29,4 +29,5 @@ missing_errors_doc = "deny"
 missing_panics_doc = "deny"
 
 [dev-dependencies]
+libc = "=0.2.186"
 tempfile = "=3.27.0"

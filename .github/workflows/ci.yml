@@ -53,6 +53,8 @@ jobs:
       # primitive rather than an opaque dump failure.
       - name: Lister primitives smoke test
         run: cargo run -p corus --example lister_primitives
+      - name: Crash-handler example (dump from a signal handler)
+        run: cargo run -p corus --example crash_handler
       - run: make tests
       - name: Archive C unit test output
         if: always()
@@ -105,6 +107,8 @@ jobs:
       # primitive rather than an opaque dump failure.
       - name: Lister primitives smoke test
         run: cargo run -p corus --example lister_primitives
+      - name: Crash-handler example (dump from a signal handler)
+        run: cargo run -p corus --example crash_handler
       - run: make tests
       - name: Archive C unit test output
         if: always()
