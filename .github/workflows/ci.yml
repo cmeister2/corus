@@ -48,6 +48,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y binutils build-essential elfutils gdb
+      # The fork-snapshot dump strategy PTRACE_ATTACHes from a clone()d helper
+      # back to the process's own threads. Yama's default ptrace_scope=1 denies
+      # this cross-task attach (EPERM), so relax it for the test run. Corus does
+      # not silently degrade when the attach is denied - it fails the dump - so
+      # the environment must permit ptrace for the fork-snapshot path to work.
+      - name: Allow ptrace (Yama scope) for fork-snapshot dumps
+        run: sudo sysctl -w kernel.yama.ptrace_scope=0
       # Fast gate: verify the lister's raw primitives (clone/getdents/ptrace)
       # work before running the full suite, so a regression points at the
       # primitive rather than an opaque dump failure.
@@ -102,6 +109,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y binutils build-essential elfutils gdb
+      # The fork-snapshot dump strategy PTRACE_ATTACHes from a clone()d helper
+      # back to the process's own threads. Yama's default ptrace_scope=1 denies
+      # this cross-task attach (EPERM), so relax it for the test run. Corus does
+      # not silently degrade when the attach is denied - it fails the dump - so
+      # the environment must permit ptrace for the fork-snapshot path to work.
+      - name: Allow ptrace (Yama scope) for fork-snapshot dumps
+        run: sudo sysctl -w kernel.yama.ptrace_scope=0
       # Fast gate: verify the lister's raw primitives (clone/getdents/ptrace)
       # work before running the full suite, so a regression points at the
       # primitive rather than an opaque dump failure.

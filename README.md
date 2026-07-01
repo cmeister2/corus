@@ -143,6 +143,12 @@ they exercise the produced `.a` as ordinary C consumers would.
 
 [`cargo nextest`]: https://nexte.st/
 
+## Troubleshooting
+
+Dumps can fail with `EPERM` in environments that restrict `ptrace` (CI runners,
+containers, Yama-hardened hosts). See [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
+for how to detect and fix this.
+
 ## Verifying the ABI
 
 ```sh
