@@ -19,7 +19,7 @@ const SIGCHLD: usize = 17;
 
 /// Child entry point used by the clone wrapper smoke example.
 extern "C" fn child(_arg: *mut c_void) -> i32 {
-    let b = [b'k'];
+    let b = [*b"k"];
     let _ = unsafe { sys::write(1, b.as_ptr() as *const c_void, 1) };
     0
 }
