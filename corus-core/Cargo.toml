@@ -15,7 +15,7 @@ corus-syscall = { version = "0.0.0-semantic-release", path = "../corus-syscall" 
 [dev-dependencies]
 # Tests only - for pipe/read/close setup and differential checks. Never linked
 # into the library.
-libc = "=0.2.186"
+libc = "=0.2.189"
 
 [lints.rust]
 missing_docs = "deny"
