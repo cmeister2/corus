@@ -9,6 +9,9 @@ description = "no_std ELF core dump engine for corus."
 keywords = ["coredump", "elf", "linux", "nostd", "debugging"]
 readme = "README.md"
 
+[features]
+diagnostic-trace = []
+
 [dependencies]
 corus-syscall = { version = "0.0.0-semantic-release", path = "../corus-syscall" }
 

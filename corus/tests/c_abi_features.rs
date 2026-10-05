@@ -151,12 +151,39 @@ fn compressed_params_preserve_callback_and_limit() -> Result<(), Box<dyn std::er
 
 #[test]
 fn c_path_accepts_non_utf8_bytes() -> Result<(), Box<dyn std::error::Error>> {
+    let strategy = std::env::var("CORUS_DIAGNOSTIC_STRATEGY").unwrap_or_else(|_| "fork".into());
+    assert!(
+        matches!(strategy.as_str(), "fork" | "frozen"),
+        "unknown diagnostic strategy: {strategy}"
+    );
+    let mut params: CoreDumpParameters = unsafe { mem::zeroed() };
+    ClearCoreDumpParametersInternal(&mut params, mem::size_of::<CoreDumpParameters>());
+    assert_eq!(SetCoreDumpLimited(&mut params, 4096), 0);
+    params.flags |= COREDUMPER_FLAG_IN_PROCESS_FROZEN;
+    let dump = |path: &CString| {
+        if strategy == "frozen" {
+            WriteCoreDumpWith(&params, path.as_ptr())
+        } else {
+            WriteCoreDumpLimited(path.as_ptr(), 4096)
+        }
+    };
     let tmp = temp_dir();
     let control = tmp.join(format!("cd_utf8_control_{}.core", process::id()));
     let control_path = CString::new(control.as_os_str().as_bytes())?;
     let _ = remove_file(&control);
 
-    let rc = WriteCoreDumpLimited(control_path.as_ptr(), 4096);
+    eprintln!(
+        "corus-test pid={} strategy={strategy} control.begin",
+        process::id()
+    );
+    let rc = dump(&control_path);
+    eprintln!(
+        "corus-test pid={} strategy={strategy} control.end rc={rc}",
+        process::id()
+    );
+    if std::env::var_os("CORUS_DIAGNOSTIC_STRICT").is_some() {
+        assert_eq!(rc, 0, "diagnostic control dump must not skip");
+    }
     if ptrace_denied(rc, "control dump") {
         return Ok(());
     }
@@ -169,7 +196,15 @@ fn c_path_accepts_non_utf8_bytes() -> Result<(), Box<dyn std::error::Error>> {
     let non_utf8_path = CString::new(non_utf8.as_os_str().as_bytes())?;
     let _ = remove_file(&non_utf8);
 
-    let rc = WriteCoreDumpLimited(non_utf8_path.as_ptr(), 4096);
+    eprintln!(
+        "corus-test pid={} strategy={strategy} non_utf8.begin",
+        process::id()
+    );
+    let rc = dump(&non_utf8_path);
+    eprintln!(
+        "corus-test pid={} strategy={strategy} non_utf8.end rc={rc}",
+        process::id()
+    );
     assert_eq!(rc, 0, "non-UTF-8 C path bytes should be accepted");
     assert_eq!(non_utf8.metadata().expect("core exists").len(), 4096);
     let _ = remove_file(&non_utf8);

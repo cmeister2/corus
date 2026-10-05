@@ -1,0 +1,79 @@
+name: Diagnose ARM hang
+
+on:
+  push:
+    branches:
+      - diagnose/renovate-35-arm-hang
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    name: ${{ matrix.runner }} / ${{ matrix.strategy }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04-arm, ubuntu-26.04-arm]
+        strategy: [fork, frozen]
+    env:
+      CARGO_TERM_COLOR: never
+      CORUS_DIAGNOSTIC_STRATEGY: ${{ matrix.strategy }}
+      CORUS_DIAGNOSTIC_STRICT: '1'
+      CORUS_DIAGNOSTIC_DIR: target/arm-hang-diagnostics
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 'lts/*'
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
+        with:
+          tool: cargo-nextest
+      - name: Prepare test environment
+        run: |
+          mkdir -p "$CORUS_DIAGNOSTIC_DIR"
+          sudo apt-get update
+          sudo apt-get install -y binutils build-essential elfutils gdb
+          sudo sysctl -w kernel.yama.ptrace_scope=0
+      - name: Record environment
+        run: |
+          {
+            git rev-parse HEAD
+            printf 'runner image: %s %s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+            cat /etc/os-release
+            uname -a
+            getconf PAGE_SIZE
+            ldd --version
+            rustc -Vv
+            cargo nextest --version
+            node --version
+            cat /proc/sys/kernel/yama/ptrace_scope
+          } | tee "$CORUS_DIAGNOSTIC_DIR/environment.log"
+      - name: Check watchdog
+        run: node --test .github/scripts/diagnose-arm-hang.test.mjs
+      - name: Build focused test and probes
+        run: |
+          cargo test -p corus --features corus-core/diagnostic-trace --test c_abi_features --no-run
+          cargo build -p corus --features corus-core/diagnostic-trace --example lister_primitives --example crash_handler
+      - name: Run primitive and signal-handler probes
+        run: |
+          timeout --kill-after=5s 30s target/debug/examples/lister_primitives 2>&1 | tee "$CORUS_DIAGNOSTIC_DIR/primitives.log"
+          timeout --kill-after=5s 30s target/debug/examples/crash_handler 2>&1 | tee "$CORUS_DIAGNOSTIC_DIR/crash-handler.log"
+      - name: Diagnose focused Nextest test
+        run: |
+          node .github/scripts/diagnose-arm-hang.mjs \
+            cargo nextest run -p corus --features corus-core/diagnostic-trace \
+            --test c_abi_features -E 'test(=c_path_accepts_non_utf8_bytes)' --no-capture
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: arm-hang-${{ matrix.runner }}-${{ matrix.strategy }}
+          path: target/arm-hang-diagnostics/
+          if-no-files-found: warn
