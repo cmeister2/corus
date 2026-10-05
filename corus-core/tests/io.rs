@@ -170,6 +170,101 @@ fn leading_zeros_all_zero_region() {
 }
 
 #[test]
+fn leading_zeros_skips_unreadable_pages() -> Result<(), Box<dyn std::error::Error>> {
+    let pagesize = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) })?;
+    let memory = unsafe {
+        libc::mmap(
+            core::ptr::null_mut(),
+            pagesize * 2,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    assert_ne!(memory, libc::MAP_FAILED);
+    unsafe { *(memory as *mut u8).add(pagesize) = 0x42 };
+    assert_eq!(
+        unsafe { libc::mprotect(memory, pagesize, libc::PROT_NONE) },
+        0
+    );
+
+    let loopback = Pipe::new().map_err(std::io::Error::from_raw_os_error)?;
+    let mut scratch = vec![0x42; pagesize];
+    let skipped = unsafe {
+        leading_zeros(
+            &loopback,
+            memory.cast(),
+            pagesize * 2,
+            pagesize,
+            &mut scratch,
+        )
+    };
+    let readable = unsafe {
+        leading_zeros(
+            &loopback,
+            (memory as *const u8).add(pagesize),
+            pagesize,
+            pagesize,
+            &mut scratch,
+        )
+    };
+    assert_eq!(
+        unsafe { libc::mprotect(memory, pagesize, libc::PROT_READ | libc::PROT_WRITE) },
+        0
+    );
+    assert_eq!(
+        unsafe {
+            libc::mprotect(
+                (memory as *mut u8).add(pagesize).cast(),
+                pagesize,
+                libc::PROT_NONE,
+            )
+        },
+        0
+    );
+    assert_eq!(
+        unsafe { libc::fcntl(loopback.write_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
+        0
+    );
+    scratch.resize(pagesize * 2, 0x42);
+    let partial = unsafe {
+        leading_zeros(
+            &loopback,
+            memory.cast(),
+            pagesize * 2,
+            pagesize * 2,
+            &mut scratch,
+        )
+    };
+    assert_eq!(
+        unsafe {
+            libc::mprotect(
+                (memory as *mut u8).add(pagesize).cast(),
+                pagesize,
+                libc::PROT_READ | libc::PROT_WRITE,
+            )
+        },
+        0
+    );
+    let reused = unsafe {
+        leading_zeros(
+            &loopback,
+            (memory as *const u8).add(pagesize),
+            pagesize,
+            pagesize,
+            &mut scratch,
+        )
+    };
+    assert_eq!(unsafe { libc::munmap(memory, pagesize * 2) }, 0);
+    assert_eq!(skipped, pagesize);
+    assert_eq!(readable, 0);
+    assert_eq!(partial, pagesize * 2);
+    assert_eq!(reused, 0);
+    Ok(())
+}
+
+#[test]
 fn c_write_writes_full_buffer() {
     let mut fds = [0i32; 2];
     assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
