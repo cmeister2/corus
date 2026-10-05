@@ -23,7 +23,10 @@ fn spawn_busy_sibling() -> (Arc<AtomicBool>, Arc<AtomicU64>, std::thread::JoinHa
     let stop = Arc::new(AtomicBool::new(false));
     let counter = Arc::new(AtomicU64::new(0));
     let (s, c) = (stop.clone(), counter.clone());
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(move || {
+        let tid = corus_core::corus_syscall::sys::gettid().expect("sibling tid");
+        ready_tx.send(tid).expect("publish sibling tid");
         while !s.load(Ordering::Relaxed) {
             // Relaxed increments in a tight loop; the absolute rate doesn't
             // matter, only that it advances while the thread is not frozen.
@@ -31,6 +34,8 @@ fn spawn_busy_sibling() -> (Arc<AtomicBool>, Arc<AtomicU64>, std::thread::JoinHa
             std::hint::spin_loop();
         }
     });
+    let tid = ready_rx.recv().expect("sibling started");
+    eprintln!("corus-strategy sibling.tid={tid}");
     (stop, counter, handle)
 }
 
@@ -57,6 +62,7 @@ struct Measured {
 /// sibling progressed during the dump relative to baseline. Returns `None` if
 /// ptrace is unavailable (caller should skip).
 fn measure(strategy: DumpStrategy, label: &str) -> Option<Measured> {
+    eprintln!("corus-strategy {label} begin pid={}", std::process::id());
     // A large dirty region makes the write phase dominate the dump so the
     // strategies separate cleanly: under InProcessFrozen the sibling is frozen
     // for ~all of it, under ForkSnapshot it runs for ~all of it.
@@ -91,6 +97,13 @@ fn measure(strategy: DumpStrategy, label: &str) -> Option<Measured> {
     stop.store(true, Ordering::Relaxed);
     let _ = handle.join();
 
+    eprintln!(
+        "corus-strategy {label} end result={r:?} before={before} after={after} elapsed_ms={:.1}",
+        dump_elapsed.as_secs_f64() * 1000.0,
+    );
+    if std::env::var_os("CORUS_DIAGNOSTIC_STRICT").is_some() {
+        assert!(r.is_ok(), "diagnostic dump must not skip: {r:?}");
+    }
     if ptrace_denied(r, label) {
         return None;
     }

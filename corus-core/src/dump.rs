@@ -325,6 +325,7 @@ pub unsafe fn capture_dump(
     for (i, &pid) in pids.iter().take(n_threads).enumerate() {
         let mut regs: Regs = unsafe { mem::zeroed() };
         let mut fpregs: FpRegs = unsafe { mem::zeroed() };
+        crate::threads::diagnostic_trace(b"registers.gp.begin", pid, 0);
         if let Err(errno) = unsafe {
             arch::ptrace_get_gpregs(
                 pid,
@@ -332,17 +333,25 @@ pub unsafe fn capture_dump(
                 mem::size_of::<Regs>(),
             )
         } {
+            crate::threads::diagnostic_trace(b"registers.gp.error", pid, errno);
             return Err(DumpError::PtraceGetRegs { pid, errno });
         }
+        crate::threads::diagnostic_trace(b"registers.gp.end", pid, 0);
 
         // FP registers are best-effort: a failure leaves them zeroed.
-        let _ = unsafe {
+        crate::threads::diagnostic_trace(b"registers.fp.begin", pid, 0);
+        let result = unsafe {
             arch::ptrace_get_fpregs(
                 pid,
                 &mut fpregs as *mut FpRegs as *mut c_void,
                 mem::size_of::<FpRegs>(),
             )
         };
+        crate::threads::diagnostic_trace(
+            b"registers.fp.end",
+            pid,
+            result.map(|_| 0).unwrap_or_else(|errno| -errno),
+        );
 
         // FRAME() override: for the thread that called the public API, replace
         // the ptrace-captured regs (parked in wait4) with the caller's snapshot
@@ -376,10 +385,14 @@ pub unsafe fn capture_dump(
     cap.main_idx = main_idx;
 
     // --- AUXV --- best-effort; failure to read auxv is not fatal.
+    crate::threads::diagnostic_trace(b"auxv.begin", main_pid, 0);
     cap.n_auxv = read_auxv(&mut cap.auxv).unwrap_or(0);
+    crate::threads::diagnostic_trace(b"auxv.end", main_pid, cap.n_auxv as c_int);
 
     // --- PRPSINFO --- built from this process's own identity, pre-fork.
+    crate::threads::diagnostic_trace(b"prpsinfo.begin", main_pid, 0);
     cap.prpsinfo = build_prpsinfo(main_pid);
+    crate::threads::diagnostic_trace(b"prpsinfo.end", main_pid, 0);
     cap.main_pid = main_pid;
 
     Ok(())
@@ -422,11 +435,13 @@ pub unsafe fn serialize_dump(
         .unwrap_or(PAGE_SIZE);
 
     // --- Memory mappings ---
+    crate::threads::diagnostic_trace(b"maps.begin", cap.main_pid, 0);
     let mut maps = mapping_buf();
     let parsed = match parse_self_maps(&mut maps) {
         Ok(n) => n,
         Err(error) => return Err(DumpError::ParseMaps(error)),
     };
+    crate::threads::diagnostic_trace(b"maps.end", cap.main_pid, parsed as c_int);
     // Loopback pipe + scratch for the leading-zeros safe page scan. Created here
     // (not pre-fork) so its fds stay private to whoever serializes.
     let loopback = match Pipe::new() {
@@ -434,7 +449,9 @@ pub unsafe fn serialize_dump(
         Err(errno) => return Err(DumpError::Pipe(errno)),
     };
     let mut scratch = [0u8; SCRATCH_LEN];
+    crate::threads::diagnostic_trace(b"mappings.finalize.begin", cap.main_pid, parsed as c_int);
     let kept = unsafe { finalize_mappings(&mut maps, parsed, pagesize, &loopback, &mut scratch) };
+    crate::threads::diagnostic_trace(b"mappings.finalize.end", cap.main_pid, kept as c_int);
 
     // Priority limiting: shrink/drop the largest segments first so the whole
     // core fits in max_length (COREDUMPER_FLAG_LIMITED_BY_PRIORITY).
@@ -645,6 +662,11 @@ impl DumpCtx<'_> {
                 let mut writer = SimpleWriter { fd: self.out_fd };
                 let result = unsafe { serialize_dump(&mut writer, cap, self.opts) };
                 if let Err(error) = result {
+                    crate::threads::diagnostic_trace(
+                        b"serialize.error",
+                        self.out_fd,
+                        crate::dump_error_errno(error),
+                    );
                     self.error = Some(error);
                 }
                 result.is_ok() || writer.done()
@@ -656,6 +678,11 @@ impl DumpCtx<'_> {
                 };
                 let result = unsafe { serialize_dump(&mut writer, cap, self.opts) };
                 if let Err(error) = result {
+                    crate::threads::diagnostic_trace(
+                        b"serialize.error",
+                        self.out_fd,
+                        crate::dump_error_errno(error),
+                    );
                     self.error = Some(error);
                 }
                 result.is_ok() || writer.done()
@@ -702,19 +729,37 @@ pub(crate) extern "C" fn dump_callback(
     // materialize a second temporary (e.g. `let cap = mem::zeroed()` followed by
     // a move) - that transiently doubles it and overflows the lister stack.
     let mut cap = MaybeUninit::<CapturedDump>::uninit();
+    crate::threads::diagnostic_trace(b"capture.begin", main_pid, num);
     if let Err(error) = unsafe { capture_dump(cap.as_mut_ptr(), pid_slice, main_pid, ctx.opts) } {
+        crate::threads::diagnostic_trace(
+            b"capture.error",
+            main_pid,
+            crate::dump_error_errno(error),
+        );
         ctx.error = Some(error);
         ctx.result = -1;
         return 0;
     }
     // SAFETY: `capture_dump` returned Ok, so every field is initialized.
     let cap = unsafe { cap.assume_init_ref() };
+    crate::threads::diagnostic_trace(b"capture.end", main_pid, num);
 
     // --- Serialize: fork a COW snapshot (default) or write in-line frozen. ---
     // `InProcessFrozen` (caller opt-out) and a failed `fork` both take the
     // in-line path: keep every sibling frozen and write the core here.
     let fork_result = match ctx.opts.strategy {
-        DumpStrategy::ForkSnapshot => sys::fork(),
+        DumpStrategy::ForkSnapshot => {
+            crate::threads::diagnostic_trace(b"fork.begin", main_pid, 0);
+            let result = sys::fork();
+            crate::threads::diagnostic_trace(
+                b"fork.end",
+                main_pid,
+                result
+                    .map(|pid| pid as c_int)
+                    .unwrap_or_else(|errno| -errno),
+            );
+            result
+        }
         DumpStrategy::InProcessFrozen => Err(0),
     };
     match fork_result {
@@ -724,7 +769,9 @@ pub(crate) extern "C" fn dump_callback(
             // from our private COW memory and exit. The exit status is the only
             // channel back to the lister.
             crate::threads::disarm_crash_state();
+            crate::threads::diagnostic_trace(b"serialize.snapshot.begin", main_pid, 0);
             let ok = ctx.run_serialize(cap);
+            crate::threads::diagnostic_trace(b"serialize.snapshot.end", main_pid, c_int::from(ok));
             sys::exit(if ok { 0 } else { 1 });
         }
         Ok(pid) => {
@@ -738,7 +785,9 @@ pub(crate) extern "C" fn dump_callback(
         Err(_) => {
             // InProcessFrozen, or fork failed (e.g. ENOMEM copying page tables
             // for a huge process): write in-line with siblings still frozen.
+            crate::threads::diagnostic_trace(b"serialize.frozen.begin", main_pid, 0);
             ctx.result = if ctx.run_serialize(cap) { 0 } else { -1 };
+            crate::threads::diagnostic_trace(b"serialize.frozen.end", main_pid, ctx.result);
             0
         }
     }

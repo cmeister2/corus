@@ -168,8 +168,17 @@ pub struct SimpleWriter {
 impl Writer for SimpleWriter {
     fn write(&mut self, buf: &[u8]) -> isize {
         match unsafe { c_write(self.fd, buf.as_ptr() as *const c_void, buf.len()) } {
-            Ok(n) => n as isize,
-            Err(_) => -1,
+            Ok(n) => {
+                if n != buf.len() {
+                    crate::threads::diagnostic_trace(b"writer.short", self.fd, n as c_int);
+                }
+                n as isize
+            }
+            Err(errno) => {
+                crate::threads::diagnostic_trace(b"writer.error", self.fd, errno);
+                crate::threads::diagnostic_trace(b"writer.bytes", self.fd, buf.len() as c_int);
+                -1
+            }
         }
     }
     fn done(&mut self) -> bool {

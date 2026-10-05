@@ -229,6 +229,20 @@ fn local_itoa(buf: &mut [u8], value: i32) -> usize {
     out
 }
 
+/// Emit a bounded, allocation-free diagnostic record using a raw syscall.
+pub(crate) fn diagnostic_trace(event: &[u8], target: c_int, result: c_int) {
+    if !cfg!(feature = "diagnostic-trace") {
+        return;
+    }
+    let mut buffer = [0u8; 192];
+    let tid = sys::gettid().map(|tid| tid as c_int).unwrap_or(-1);
+    let mut length = build_path(&mut buffer, &[b"corus-trace tid="], Some(tid));
+    length += build_path(&mut buffer[length..], &[b" target="], Some(target));
+    length += build_path(&mut buffer[length..], &[b" result="], Some(result));
+    length += build_path(&mut buffer[length..], &[b" event=", event, b"\n"], None);
+    let _ = unsafe { sys::write(2, buffer.as_ptr() as *const c_void, length) };
+}
+
 /// atoi for a `&[u8]` prefix of digits. Port of `local_atoi`.
 fn local_atoi(s: &[u8]) -> i32 {
     let mut n: i32 = 0;
@@ -271,7 +285,14 @@ struct ListerParams {
 pub fn resume_all_process_threads(pids: &[c_int]) -> bool {
     let mut any = false;
     for &pid in pids {
-        if sys::ptrace_detach(pid).is_ok() {
+        diagnostic_trace(b"detach.begin", pid, 0);
+        let result = sys::ptrace_detach(pid);
+        diagnostic_trace(
+            b"detach.end",
+            pid,
+            result.map(|_| 0).unwrap_or_else(|errno| -errno),
+        );
+        if result.is_ok() {
             any = true;
         }
     }
@@ -309,6 +330,7 @@ extern "C" fn lister_thread(arg: *mut c_void) -> c_int {
         Ok(p) => p as c_int,
         Err(e) => return fail(params, e),
     };
+    diagnostic_trace(b"lister.begin", ppid, 0);
 
     // Marker socket: identifies threads sharing our fd table + VM.
     let marker = match sys::socket(PF_LOCAL, SOCK_DGRAM, 0) {
@@ -437,7 +459,9 @@ extern "C" fn lister_thread(arg: *mut c_void) -> c_int {
     }
 
     // Invoke the callback with all threads frozen.
+    diagnostic_trace(b"callback.begin", ppid, num_threads as c_int);
     let rc = (params.callback)(params.parameter, pids.as_ptr(), num_threads as c_int);
+    diagnostic_trace(b"callback.end", ppid, rc);
     params.result = rc;
     params.err = 0;
 
@@ -470,10 +494,18 @@ extern "C" fn lister_thread(arg: *mut c_void) -> c_int {
 fn reap_snapshot_child(params: &mut ListerParams, child: c_int) {
     let mut status: c_int = 0;
     loop {
+        diagnostic_trace(b"snapshot.wait.begin", child, 0);
         match unsafe { sys::wait4(child, &mut status, WALL, ptr::null_mut()) } {
-            Ok(_) => break,
-            Err(EINTR) => continue,
+            Ok(_) => {
+                diagnostic_trace(b"snapshot.wait.end", child, status);
+                break;
+            }
+            Err(EINTR) => {
+                diagnostic_trace(b"snapshot.wait.interrupted", child, EINTR);
+                continue;
+            }
             Err(errno) => {
+                diagnostic_trace(b"snapshot.wait.error", child, errno);
                 params.result = -1;
                 params.err = errno;
                 return;
@@ -555,15 +587,30 @@ fn decode_lister_status(status: c_int, params: &mut ListerParams) {
 /// address space. Returns true if the thread is now attached and verified.
 fn attach_and_verify(pid: c_int) -> bool {
     // Attach (suspends the thread).
-    if unsafe { sys::ptrace(PTRACE_ATTACH, pid, ptr::null_mut(), ptr::null_mut()) }.is_err() {
+    diagnostic_trace(b"attach.begin", pid, 0);
+    let result = unsafe { sys::ptrace(PTRACE_ATTACH, pid, ptr::null_mut(), ptr::null_mut()) };
+    diagnostic_trace(
+        b"attach.end",
+        pid,
+        result.map(|_| 0).unwrap_or_else(|errno| -errno),
+    );
+    if result.is_err() {
         return false;
     }
     // Wait for the stop.
     loop {
+        diagnostic_trace(b"attach.wait.begin", pid, 0);
         match unsafe { sys::wait4(pid, ptr::null_mut(), WALL, ptr::null_mut()) } {
-            Ok(_) => break,
-            Err(EINTR) => continue,
-            Err(_) => {
+            Ok(_) => {
+                diagnostic_trace(b"attach.wait.end", pid, 0);
+                break;
+            }
+            Err(EINTR) => {
+                diagnostic_trace(b"attach.wait.interrupted", pid, EINTR);
+                continue;
+            }
+            Err(errno) => {
+                diagnostic_trace(b"attach.wait.error", pid, errno);
                 let _ = sys::ptrace_detach(pid);
                 return false;
             }
@@ -589,6 +636,11 @@ fn attach_and_verify(pid: c_int) -> bool {
         )
     };
     if peek1.is_err() || i != j {
+        diagnostic_trace(
+            b"verify.first.failed",
+            pid,
+            peek1.map(|_| 0).unwrap_or_else(|errno| -errno),
+        );
         let _ = sys::ptrace_detach(pid);
         return false;
     }
@@ -602,9 +654,15 @@ fn attach_and_verify(pid: c_int) -> bool {
         )
     };
     if peek2.is_err() || i != j {
+        diagnostic_trace(
+            b"verify.second.failed",
+            pid,
+            peek2.map(|_| 0).unwrap_or_else(|errno| -errno),
+        );
         let _ = sys::ptrace_detach(pid);
         return false;
     }
+    diagnostic_trace(b"verify.end", pid, 0);
     true
 }
 
@@ -619,10 +677,13 @@ fn thread_shares_address_space(tid: c_int, marker: c_int, marker_sb: &KernelStat
     len += build_path(&mut path[len..], &[b"/fd/"], Some(marker));
     let cstr = nul_terminate(&path, len);
     let mut sb = KernelStat::zeroed();
-    if unsafe { sys::stat(cstr.as_ptr() as *const c_char, &mut sb) }.is_err() {
+    if let Err(errno) = unsafe { sys::stat(cstr.as_ptr() as *const c_char, &mut sb) } {
+        diagnostic_trace(b"candidate.stat.error", tid, errno);
         return false;
     }
-    sb.st_ino == marker_sb.st_ino
+    let shared = sb.st_ino == marker_sb.st_ino;
+    diagnostic_trace(b"candidate.marker", tid, c_int::from(shared));
+    shared
 }
 
 /// Parse a `/proc/<n>/task` entry name into a tid, skipping a leading '.' some
@@ -711,6 +772,13 @@ pub unsafe fn list_all_process_threads(
         )
     };
     let clone_pid = corus_syscall::from_ret(clone_ret);
+    diagnostic_trace(
+        b"lister.clone",
+        0,
+        clone_pid
+            .map(|pid| pid as c_int)
+            .unwrap_or_else(|errno| -errno),
+    );
 
     // Allow the lister to ptrace us under YAMA.
     if let Ok(cp) = clone_pid {
@@ -729,10 +797,18 @@ pub unsafe fn list_all_process_threads(
             // Reap the lister.
             let mut status: c_int = 0;
             loop {
+                diagnostic_trace(b"lister.wait.begin", cp as c_int, 0);
                 match unsafe { sys::wait4(cp as c_int, &mut status, WALL, ptr::null_mut()) } {
-                    Ok(_) => break,
-                    Err(EINTR) => continue,
+                    Ok(_) => {
+                        diagnostic_trace(b"lister.wait.end", cp as c_int, status);
+                        break;
+                    }
+                    Err(EINTR) => {
+                        diagnostic_trace(b"lister.wait.interrupted", cp as c_int, EINTR);
+                        continue;
+                    }
                     Err(e) => {
+                        diagnostic_trace(b"lister.wait.error", cp as c_int, e);
                         params.err = e;
                         params.result = -1;
                         break;
