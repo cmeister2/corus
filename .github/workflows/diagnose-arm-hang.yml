@@ -81,10 +81,17 @@ jobs:
             fi
           done
           exit "$result"
+      - name: Full regression suite
+        run: |
+          CORUS_DIAGNOSTIC_TIMEOUT_MS=360000 \
+          CORUS_DIAGNOSTIC_DIR="$CORUS_DIAGNOSTIC_DIR/full-suite" \
+          node .github/scripts/diagnose-arm-hang.mjs make tests
       - name: Upload diagnostic evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: strategy-${{ matrix.runner }}-trace-${{ matrix.trace }}
-          path: target/strategy-diagnostics/
+          path: |
+            target/strategy-diagnostics/
+            target/original-c-unit/output.txt
           if-no-files-found: warn

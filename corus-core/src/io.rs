@@ -348,7 +348,7 @@ impl Io {
 /// # Safety
 /// `mem` must describe a mapped address range of `scratch.len()` bytes;
 /// individual pages may be unreadable. The pipe must have no other users.
-pub unsafe fn read_memory(
+pub(crate) unsafe fn read_memory(
     loopback: &Pipe,
     mem: *const u8,
     scratch: &mut [u8],
