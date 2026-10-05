@@ -339,6 +339,43 @@ impl Io {
     }
 }
 
+/// Copy process memory through a kernel pipe without directly dereferencing it.
+/// Returns the number of readable bytes copied into `scratch`.
+///
+/// # Errors
+/// Returns the syscall error if probing or draining the pipe fails.
+///
+/// # Safety
+/// `mem` must describe a mapped address range of `scratch.len()` bytes;
+/// individual pages may be unreadable. The pipe must have no other users.
+pub unsafe fn read_memory(
+    loopback: &Pipe,
+    mem: *const u8,
+    scratch: &mut [u8],
+) -> Result<usize, i32> {
+    let wrote = loop {
+        match unsafe { sys::write(loopback.write_fd(), mem.cast(), scratch.len()) } {
+            Err(EINTR) => continue,
+            result => break result?,
+        }
+    };
+    let mut read = 0;
+    while read < wrote {
+        let bytes = unsafe {
+            c_read(
+                loopback.read_fd(),
+                scratch.as_mut_ptr().add(read).cast(),
+                wrote - read,
+            )
+        }?;
+        if bytes == 0 {
+            break;
+        }
+        read += bytes;
+    }
+    Ok(read)
+}
+
 /// Counts leading zero bytes in `[mem, mem+len)`, rounded down to a page
 /// boundary. Port of `LeadingZeros`.
 ///
@@ -362,27 +399,8 @@ pub unsafe fn leading_zeros(
 
     while count < len {
         if count.is_multiple_of(pagesize) {
-            let src = unsafe { mem.add(count) } as *const c_void;
-            let wrote = loop {
-                match unsafe { sys::write(loopback.write_fd(), src, pagesize) } {
-                    Err(EINTR) => continue,
-                    result => break result.unwrap_or(0),
-                }
-            };
-            let mut read = 0;
-            while read < wrote {
-                match unsafe {
-                    c_read(
-                        loopback.read_fd(),
-                        scratch.as_mut_ptr().add(read) as *mut c_void,
-                        wrote - read,
-                    )
-                } {
-                    Ok(0) | Err(_) => break,
-                    Ok(bytes) => read += bytes,
-                }
-            }
-            if wrote != pagesize || read != pagesize {
+            let read = unsafe { read_memory(loopback, mem.add(count), &mut scratch[..pagesize]) };
+            if read != Ok(pagesize) {
                 // Unreadable page: assume all zeros, skip it.
                 count += pagesize;
                 continue;

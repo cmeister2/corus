@@ -11,10 +11,11 @@
 //! is not required for a loadable core.
 
 use crate::elf::{AuxvT, Ehdr, FpRegs, PT_LOAD, PT_NOTE, Phdr, Prpsinfo, Prstatus, Regs};
-use crate::io::Writer;
+use crate::io::{Pipe, Writer, read_memory};
 use crate::notes::{self, NoteWriteError, note_size};
 use crate::proc_parse::Mapping;
 use core::mem;
+use corus_syscall::linux::EFAULT;
 
 /// Error returned while assembling the ELF core file.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -132,9 +133,8 @@ impl CoreInputs<'_> {
     /// Returns the section of core assembly that failed to write fully.
     ///
     /// # Safety
-    /// Reads the process's own mapping memory (`mapping.start..write_size`) while
-    /// streaming PT_LOAD contents; the address space must be stable (threads
-    /// suspended) and the mappings must reflect the current `/proc/self/maps`.
+    /// Mapping addresses must remain mapped while streaming PT_LOAD contents.
+    /// Unreadable pages are copied as zeros through a kernel memory probe.
     pub unsafe fn create_elf_core(&self, w: &mut dyn Writer) -> Result<(), CreateElfCoreError> {
         let pagesize = self.pagesize;
         let num_mappings = self.mappings.len();
@@ -195,16 +195,26 @@ impl CoreInputs<'_> {
         }
 
         // --- Segment contents ---
+        let loopback = Pipe::new().map_err(|_| CreateElfCoreError::Segment)?;
+        let mut scratch = [0u8; 4096];
         for mapping in self.mappings {
-            if mapping.write_size > 0 {
-                // SAFETY: caller guarantees the address space is stable and these
-                // bytes are readable (non-readable mappings were filtered out in
-                // finalize_mappings).
-                let bytes = unsafe {
-                    core::slice::from_raw_parts(mapping.start as *const u8, mapping.write_size)
-                };
-                w.write_full(bytes)
+            let mut offset = 0;
+            while offset < mapping.write_size {
+                let chunk = (mapping.write_size - offset).min(scratch.len());
+                scratch[..chunk].fill(0);
+                match unsafe {
+                    read_memory(
+                        &loopback,
+                        (mapping.start as *const u8).add(offset),
+                        &mut scratch[..chunk],
+                    )
+                } {
+                    Ok(_) | Err(EFAULT) => {}
+                    Err(_) => return Err(CreateElfCoreError::Segment),
+                }
+                w.write_full(&scratch[..chunk])
                     .map_err(|_| CreateElfCoreError::Segment)?;
+                offset += chunk;
             }
         }
 
