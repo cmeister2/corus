@@ -321,15 +321,26 @@ pub unsafe fn leading_zeros(
     while count < len {
         if count.is_multiple_of(pagesize) {
             let src = unsafe { mem.add(count) } as *const c_void;
-            let wrote = unsafe { c_write(loopback.write_fd(), src, pagesize) };
-            let read = unsafe {
-                c_read(
-                    loopback.read_fd(),
-                    scratch.as_mut_ptr() as *mut c_void,
-                    pagesize,
-                )
+            let wrote = loop {
+                match unsafe { sys::write(loopback.write_fd(), src, pagesize) } {
+                    Err(EINTR) => continue,
+                    result => break result.unwrap_or(0),
+                }
             };
-            if wrote.is_err() || read.is_err() {
+            let mut read = 0;
+            while read < wrote {
+                match unsafe {
+                    c_read(
+                        loopback.read_fd(),
+                        scratch.as_mut_ptr().add(read) as *mut c_void,
+                        wrote - read,
+                    )
+                } {
+                    Ok(0) | Err(_) => break,
+                    Ok(bytes) => read += bytes,
+                }
+            }
+            if wrote != pagesize || read != pagesize {
                 // Unreadable page: assume all zeros, skip it.
                 count += pagesize;
                 continue;
