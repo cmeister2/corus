@@ -205,7 +205,7 @@ impl CoreInputs<'_> {
                 match unsafe {
                     read_memory(
                         &loopback,
-                        (mapping.start as *const u8).add(offset),
+                        (mapping.start as *const u8).wrapping_add(offset),
                         &mut scratch[..chunk],
                     )
                 } {

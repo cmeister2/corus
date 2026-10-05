@@ -399,7 +399,8 @@ pub unsafe fn leading_zeros(
 
     while count < len {
         if count.is_multiple_of(pagesize) {
-            let read = unsafe { read_memory(loopback, mem.add(count), &mut scratch[..pagesize]) };
+            let read =
+                unsafe { read_memory(loopback, mem.wrapping_add(count), &mut scratch[..pagesize]) };
             if read != Ok(pagesize) {
                 // Unreadable page: assume all zeros, skip it.
                 count += pagesize;
