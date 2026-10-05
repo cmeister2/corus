@@ -100,6 +100,7 @@ pub unsafe fn write_core_dump_to_fd_options(
     out_fd: c_int,
     opts: &dump::DumpOptions,
 ) -> Result<c_int, CoreDumpError> {
+    threads::diagnostic_trace(b"dump.entry", out_fd, 0);
     // FRAME(): snapshot the caller's registers here, at the outermost engine
     // entry, before any suspension machinery runs. Applied to the dumping
     // thread so its core backtrace reflects the call site, not `wait4`. If the
@@ -126,6 +127,7 @@ pub unsafe fn write_core_dump_to_fd_options(
             dump::DUMP_CALLBACK_STACK,
         )
     };
+    threads::diagnostic_trace(b"dump.exit", out_fd, rc.unwrap_or_else(|errno| -errno));
     match rc {
         Err(errno) => Err(CoreDumpError::ThreadList(errno)),
         Ok(_) if ctx.result == 0 => Ok(0),

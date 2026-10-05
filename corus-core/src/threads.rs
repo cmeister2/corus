@@ -236,7 +236,15 @@ pub(crate) fn diagnostic_trace(event: &[u8], target: c_int, result: c_int) {
     }
     let mut buffer = [0u8; 192];
     let tid = sys::gettid().map(|tid| tid as c_int).unwrap_or(-1);
+    #[cfg(target_arch = "x86_64")]
+    const CLOCK_GETTIME: usize = 228;
+    #[cfg(target_arch = "aarch64")]
+    const CLOCK_GETTIME: usize = 113;
+    let mut time = [0i64; 2];
+    let _ = unsafe { corus_syscall::arch::syscall2(CLOCK_GETTIME, 1, time.as_mut_ptr() as usize) };
     let mut length = build_path(&mut buffer, &[b"corus-trace tid="], Some(tid));
+    length += build_path(&mut buffer[length..], &[b" sec="], Some(time[0] as c_int));
+    length += build_path(&mut buffer[length..], &[b" nsec="], Some(time[1] as c_int));
     length += build_path(&mut buffer[length..], &[b" target="], Some(target));
     length += build_path(&mut buffer[length..], &[b" result="], Some(result));
     length += build_path(&mut buffer[length..], &[b" event=", event, b"\n"], None);
@@ -914,6 +922,7 @@ pub unsafe fn with_mmap_stack(
     const MAP_ANONYMOUS: c_int = 0x20;
     const MAP_STACK: c_int = 0x20000;
 
+    diagnostic_trace(b"stack.map.begin", 0, stack_size as c_int);
     let base = unsafe {
         sys::mmap(
             ptr::null_mut(),
@@ -924,9 +933,12 @@ pub unsafe fn with_mmap_stack(
             0,
         )
     }?;
+    diagnostic_trace(b"stack.map.end", 0, 0);
     let top = (base + stack_size) as *mut c_void;
     let result = unsafe { list_all_process_threads(parameter, callback, top) };
+    diagnostic_trace(b"stack.unmap.begin", 0, 0);
     let _ = unsafe { sys::munmap(base as *mut c_void, stack_size) };
+    diagnostic_trace(b"stack.unmap.end", 0, 0);
     result
 }
 
