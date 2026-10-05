@@ -177,6 +177,39 @@ impl Writer for SimpleWriter {
             Err(errno) => {
                 crate::threads::diagnostic_trace(b"writer.error", self.fd, errno);
                 crate::threads::diagnostic_trace(b"writer.bytes", self.fd, buf.len() as c_int);
+                if cfg!(feature = "diagnostic-trace") {
+                    let address = buf.as_ptr() as usize;
+                    crate::threads::diagnostic_trace(
+                        b"writer.address.high",
+                        self.fd,
+                        (address >> 32) as c_int,
+                    );
+                    crate::threads::diagnostic_trace(
+                        b"writer.address.low",
+                        self.fd,
+                        address as c_int,
+                    );
+                    if let Ok(fd) = unsafe {
+                        sys::open(
+                            c"/proc/self/maps".as_ptr(),
+                            corus_syscall::linux::O_RDONLY,
+                            0,
+                        )
+                    } {
+                        let mut maps = [0u8; 4096];
+                        loop {
+                            match unsafe {
+                                c_read(fd as c_int, maps.as_mut_ptr().cast(), maps.len())
+                            } {
+                                Ok(0) | Err(_) => break,
+                                Ok(bytes) => {
+                                    let _ = unsafe { sys::write(2, maps.as_ptr().cast(), bytes) };
+                                }
+                            }
+                        }
+                        let _ = sys::close(fd as c_int);
+                    }
+                }
                 -1
             }
         }
