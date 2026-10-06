@@ -12,7 +12,7 @@
 //! `libc` is a dev-dependency only - never linked into the library itself.
 
 use core::ffi::c_void;
-use corus_syscall::sys;
+use corus_syscall::{linux, sys};
 
 /// Map our `SysResult` to the libc `(ret, errno)` convention for comparison.
 fn split(r: sys::SysResult) -> (isize, i32) {
@@ -20,6 +20,12 @@ fn split(r: sys::SysResult) -> (isize, i32) {
         Ok(v) => (v as isize, 0),
         Err(e) => (-1, e),
     }
+}
+
+#[test]
+fn pipe_capacity_constants_match_libc() {
+    assert_eq!(linux::F_GETPIPE_SZ, libc::F_GETPIPE_SZ);
+    assert_eq!(linux::F_SETPIPE_SZ, libc::F_SETPIPE_SZ);
 }
 
 #[test]
@@ -139,6 +145,48 @@ fn mmap_munmap_roundtrip() {
         assert_eq!(p.read_volatile(), 0xAB);
     }
     unsafe { sys::munmap(p as *mut c_void, len) }.expect("munmap");
+}
+
+#[test]
+fn memory_probe_reports_efault_and_pipe_remains_usable() -> Result<(), Box<dyn std::error::Error>> {
+    let pagesize = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) })?;
+    let memory = unsafe {
+        libc::mmap(
+            core::ptr::null_mut(),
+            pagesize,
+            libc::PROT_NONE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    assert_ne!(memory, libc::MAP_FAILED);
+    let mut fds = [0i32; 2];
+    unsafe { sys::pipe2(fds.as_mut_ptr(), 0) }.map_err(std::io::Error::from_raw_os_error)?;
+    let fault = unsafe { sys::write_memory_probe(fds[1], memory, pagesize) };
+    assert_eq!(fault, Err(libc::EFAULT));
+    let flags = unsafe { libc::fcntl(fds[0], libc::F_GETFL) };
+    assert!(flags >= 0);
+    assert_eq!(
+        unsafe { libc::fcntl(fds[0], libc::F_SETFL, flags | libc::O_NONBLOCK) },
+        0
+    );
+    let mut vacant = [0u8; 1];
+    let cleared = unsafe { sys::read(fds[0], vacant.as_mut_ptr().cast(), vacant.len()) };
+    assert_eq!(unsafe { libc::fcntl(fds[0], libc::F_SETFL, flags) }, 0);
+    assert_eq!(cleared, Err(libc::EAGAIN));
+    let message = b"after fault";
+    let written =
+        unsafe { sys::write_memory_probe(fds[1], message.as_ptr().cast(), message.len()) };
+    assert_eq!(written, Ok(message.len()));
+    let mut output = [0u8; 16];
+    let read = unsafe { sys::read(fds[0], output.as_mut_ptr().cast(), message.len()) };
+    assert_eq!(unsafe { libc::munmap(memory, pagesize) }, 0);
+    sys::close(fds[0]).map_err(std::io::Error::from_raw_os_error)?;
+    sys::close(fds[1]).map_err(std::io::Error::from_raw_os_error)?;
+    assert_eq!(read, Ok(message.len()));
+    assert_eq!(&output[..message.len()], message);
+    Ok(())
 }
 
 #[test]

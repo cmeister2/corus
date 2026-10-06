@@ -11,10 +11,11 @@
 //! is not required for a loadable core.
 
 use crate::elf::{AuxvT, Ehdr, FpRegs, PT_LOAD, PT_NOTE, Phdr, Prpsinfo, Prstatus, Regs};
-use crate::io::Writer;
+use crate::io::{MEMORY_BUFFER_SIZE, Pipe, Writer, read_memory};
 use crate::notes::{self, NoteWriteError, note_size};
 use crate::proc_parse::Mapping;
 use core::mem;
+use corus_syscall::linux::EFAULT;
 
 /// Error returned while assembling the ELF core file.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -132,12 +133,20 @@ impl CoreInputs<'_> {
     /// Returns the section of core assembly that failed to write fully.
     ///
     /// # Safety
-    /// Reads the process's own mapping memory (`mapping.start..write_size`) while
-    /// streaming PT_LOAD contents; the address space must be stable (threads
-    /// suspended) and the mappings must reflect the current `/proc/self/maps`.
+    /// The dumped ranges must remain mapped during serialization, and each
+    /// mapping's `write_size` must fit within its range. `pagesize` must be a
+    /// nonzero power of two. Source bytes are copied only by the kernel, without
+    /// Rust references. Private mappings can be coherent when their owners are
+    /// stopped or a copy-on-write snapshot is used; shared mappings can still
+    /// change concurrently and are always observed on a best-effort basis.
+    /// Unreadable pages are copied as zeros through a kernel memory probe.
     pub unsafe fn create_elf_core(&self, w: &mut dyn Writer) -> Result<(), CreateElfCoreError> {
         let pagesize = self.pagesize;
         let num_mappings = self.mappings.len();
+        let loopback = Pipe::new().map_err(|_| CreateElfCoreError::Segment)?;
+        let capacity = loopback
+            .memory_capacity()
+            .map_err(|_| CreateElfCoreError::Segment)?;
 
         // --- Ehdr ---
         let mut ehdr = Ehdr::new_core();
@@ -195,16 +204,46 @@ impl CoreInputs<'_> {
         }
 
         // --- Segment contents ---
+        let mut scratch = [0u8; MEMORY_BUFFER_SIZE];
         for mapping in self.mappings {
-            if mapping.write_size > 0 {
-                // SAFETY: caller guarantees the address space is stable and these
-                // bytes are readable (non-readable mappings were filtered out in
-                // finalize_mappings).
-                let bytes = unsafe {
-                    core::slice::from_raw_parts(mapping.start as *const u8, mapping.write_size)
-                };
-                w.write_full(bytes)
+            let mut offset = 0;
+            while offset < mapping.write_size {
+                let chunk = (mapping.write_size - offset).min(scratch.len());
+                scratch[..chunk].fill(0);
+                let mut copied = 0;
+                while copied < chunk {
+                    let probe = (chunk - copied).min(capacity);
+                    let address = mapping.start.wrapping_add(offset + copied);
+                    match unsafe {
+                        read_memory(
+                            &loopback,
+                            address as *const u8,
+                            &mut scratch[copied..copied + probe],
+                        )
+                    } {
+                        Ok(0) | Err(EFAULT) => {
+                            const MIN_KERNEL_PAGE: usize = 4096;
+                            let page_chunk =
+                                (MIN_KERNEL_PAGE - address % MIN_KERNEL_PAGE).min(chunk - copied);
+                            match unsafe {
+                                read_memory(
+                                    &loopback,
+                                    address as *const u8,
+                                    &mut scratch[copied..copied + page_chunk],
+                                )
+                            } {
+                                Ok(0) | Err(EFAULT) => copied += page_chunk,
+                                Ok(bytes) => copied += bytes,
+                                Err(_) => return Err(CreateElfCoreError::Segment),
+                            }
+                        }
+                        Ok(bytes) => copied += bytes,
+                        Err(_) => return Err(CreateElfCoreError::Segment),
+                    }
+                }
+                w.write_full(&scratch[..chunk])
                     .map_err(|_| CreateElfCoreError::Segment)?;
+                offset += chunk;
             }
         }
 

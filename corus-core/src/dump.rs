@@ -90,6 +90,7 @@ pub const DUMP_CALLBACK_STACK: usize = MAX_DUMP_THREADS * mem::size_of::<ThreadS
     + MAX_MAPPINGS * mem::size_of::<Mapping>()  // maps[]
     + MAX_AUXV * mem::size_of::<AuxvT>()        // auxv[]
     + SCRATCH_LEN
+    + crate::io::MEMORY_BUFFER_SIZE
     + EXE_PATH_LEN
     + FRAME_HEADROOM;
 
@@ -435,6 +436,7 @@ pub unsafe fn serialize_dump(
     };
     let mut scratch = [0u8; SCRATCH_LEN];
     let kept = unsafe { finalize_mappings(&mut maps, parsed, pagesize, &loopback, &mut scratch) };
+    drop(loopback);
 
     // Priority limiting: shrink/drop the largest segments first so the whole
     // core fits in max_length (COREDUMPER_FLAG_LIMITED_BY_PRIORITY).

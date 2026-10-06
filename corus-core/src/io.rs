@@ -12,7 +12,7 @@
 
 use core::ffi::{c_int, c_void};
 
-use corus_syscall::linux::EINTR;
+use corus_syscall::linux::{EAGAIN, EFAULT, EINTR, F_GETPIPE_SZ, F_SETPIPE_SZ, O_NONBLOCK};
 use corus_syscall::sys;
 
 /// Error returned by [`Writer::write_full`].
@@ -31,6 +31,9 @@ pub enum WriteError {
 
 /// Read buffer size for [`Io`].
 const IO_BUF_SIZE: usize = 4096;
+
+/// Staged segment output size, independent of the kernel pipe capacity.
+pub(crate) const MEMORY_BUFFER_SIZE: usize = 64 * 1024;
 
 /// Owned pipe file descriptors.
 pub struct Pipe {
@@ -62,6 +65,23 @@ impl Pipe {
     /// Write end file descriptor.
     pub const fn write_fd(&self) -> c_int {
         self.write_fd
+    }
+
+    /// Obtain the capacity used for safe synchronous memory probes.
+    /// Growing the pipe is best-effort; an unprivileged limit keeps its current size.
+    ///
+    /// # Errors
+    /// Returns the kernel errno if querying the pipe capacity fails.
+    pub(crate) fn memory_capacity(&self) -> Result<usize, i32> {
+        let capacity = unsafe { sys::fcntl(self.write_fd, F_GETPIPE_SZ, 0) }?;
+        if capacity < MEMORY_BUFFER_SIZE {
+            Ok(
+                unsafe { sys::fcntl(self.write_fd, F_SETPIPE_SZ, MEMORY_BUFFER_SIZE) }
+                    .unwrap_or(capacity),
+            )
+        } else {
+            Ok(capacity)
+        }
     }
 
     /// Transfer ownership of both file descriptors to the caller.
@@ -297,6 +317,80 @@ impl Io {
     }
 }
 
+/// Copy process memory through a kernel pipe without directly dereferencing it.
+/// Returns the number of readable bytes copied into `scratch`.
+///
+/// # Errors
+/// Returns the syscall error if probing or draining the pipe fails.
+///
+/// # Safety
+/// `mem` must describe a mapped address range of `scratch.len()` bytes;
+/// individual pages may be unreadable. The range must remain mapped, but source
+/// contents may change: only the kernel reads them, without a Rust reference.
+/// Such changes give a best-effort observation. The pipe must be empty
+/// with no other users, and `scratch.len()` must not exceed its capacity.
+pub(crate) unsafe fn read_memory(
+    loopback: &Pipe,
+    mem: *const u8,
+    scratch: &mut [u8],
+) -> Result<usize, i32> {
+    let wrote = loop {
+        match unsafe { sys::write_memory_probe(loopback.write_fd(), mem.cast(), scratch.len()) } {
+            Err(EINTR) => continue,
+            Err(EFAULT) => {
+                clear_probe_slots(loopback)?;
+                return Err(EFAULT);
+            }
+            result => break result?,
+        }
+    };
+    let mut read = 0;
+    while read < wrote {
+        let bytes = unsafe {
+            c_read(
+                loopback.read_fd(),
+                scratch.as_mut_ptr().add(read).cast(),
+                wrote - read,
+            )
+        }?;
+        if bytes == 0 {
+            break;
+        }
+        read += bytes;
+    }
+    if wrote < scratch.len() {
+        clear_probe_slots(loopback)?;
+    }
+    Ok(read)
+}
+
+/// Release empty kernel pipe slots left behind by a faulted memory probe.
+///
+/// # Errors
+/// Returns the kernel errno if draining or restoring descriptor flags fails.
+fn clear_probe_slots(loopback: &Pipe) -> Result<(), i32> {
+    const F_GETFL: c_int = 3;
+    const F_SETFL: c_int = 4;
+    let flags = unsafe { sys::fcntl(loopback.read_fd(), F_GETFL, 0) }?;
+    unsafe { sys::fcntl(loopback.read_fd(), F_SETFL, flags | O_NONBLOCK as usize) }?;
+    let mut discarded = [0u8; 1];
+    let drained = loop {
+        match unsafe {
+            c_read(
+                loopback.read_fd(),
+                discarded.as_mut_ptr().cast(),
+                discarded.len(),
+            )
+        } {
+            Ok(0) | Err(EAGAIN) => break Ok(()),
+            Ok(_) => continue,
+            Err(errno) => break Err(errno),
+        }
+    };
+    unsafe { sys::fcntl(loopback.read_fd(), F_SETFL, flags) }?;
+    drained
+}
+
 /// Counts leading zero bytes in `[mem, mem+len)`, rounded down to a page
 /// boundary. Port of `LeadingZeros`.
 ///
@@ -307,6 +401,12 @@ impl Io {
 /// # Safety
 /// `mem` must be a valid pointer to at least `len` bytes (in the address-space
 /// sense; individual pages may be unreadable, which is the case this handles).
+/// The range must remain mapped. Concurrent source changes are observed only
+/// through kernel copies and give a best-effort result. `pagesize` must be a
+/// nonzero power of two, `len` must be a multiple
+/// of `pagesize`, and `scratch.len()` must be at least `pagesize`. The pipe must be empty,
+/// exclusively used by this operation, have both ends open, and have capacity
+/// for at least one page.
 pub unsafe fn leading_zeros(
     loopback: &Pipe,
     mem: *const u8,
@@ -320,30 +420,16 @@ pub unsafe fn leading_zeros(
 
     while count < len {
         if count.is_multiple_of(pagesize) {
-            let src = unsafe { mem.add(count) } as *const c_void;
-            let wrote = loop {
-                match unsafe { sys::write(loopback.write_fd(), src, pagesize) } {
-                    Err(EINTR) => continue,
-                    result => break result.unwrap_or(0),
+            let read =
+                unsafe { read_memory(loopback, mem.wrapping_add(count), &mut scratch[..pagesize]) };
+            match read {
+                Ok(bytes) if bytes == pagesize => {}
+                Ok(_) | Err(EFAULT) => {
+                    // Unreadable page: assume all zeros, skip it.
+                    count += pagesize;
+                    continue;
                 }
-            };
-            let mut read = 0;
-            while read < wrote {
-                match unsafe {
-                    c_read(
-                        loopback.read_fd(),
-                        scratch.as_mut_ptr().add(read) as *mut c_void,
-                        wrote - read,
-                    )
-                } {
-                    Ok(0) | Err(_) => break,
-                    Ok(bytes) => read += bytes,
-                }
-            }
-            if wrote != pagesize || read != pagesize {
-                // Unreadable page: assume all zeros, skip it.
-                count += pagesize;
-                continue;
+                Err(_) => break,
             }
             ptr = 0;
         }
@@ -354,4 +440,28 @@ pub unsafe fn leading_zeros(
         count += 1;
     }
     count & !(pagesize - 1)
+}
+
+#[cfg(all(test, not(miri)))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_capacity_matches_kernel_limit() {
+        let pipe = Pipe::new().expect("pipe");
+        unsafe { sys::fcntl(pipe.write_fd(), F_SETPIPE_SZ, 4096) }.expect("shrink pipe");
+        let capacity = pipe.memory_capacity().expect("memory capacity");
+        assert_eq!(
+            unsafe { sys::fcntl(pipe.write_fd(), F_GETPIPE_SZ, 0) },
+            Ok(capacity)
+        );
+        assert!(capacity > 0);
+        let source = [0x5a; MEMORY_BUFFER_SIZE];
+        let mut scratch = [0u8; MEMORY_BUFFER_SIZE];
+        for bytes in source.chunks(capacity.min(MEMORY_BUFFER_SIZE)) {
+            let read = unsafe { read_memory(&pipe, bytes.as_ptr(), &mut scratch[..bytes.len()]) };
+            assert_eq!(read, Ok(bytes.len()));
+            assert_eq!(&scratch[..bytes.len()], bytes);
+        }
+    }
 }

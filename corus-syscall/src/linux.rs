@@ -14,6 +14,18 @@ pub const EINVAL: i32 = 22;
 /// Interrupted system call.
 pub const EINTR: i32 = 4;
 
+/// Operation would block.
+pub const EAGAIN: i32 = 11;
+
+/// `fcntl(2)` command to query pipe capacity in bytes.
+pub const F_GETPIPE_SZ: i32 = 1032;
+
+/// `fcntl(2)` command to set pipe capacity in bytes.
+pub const F_SETPIPE_SZ: i32 = 1031;
+
+/// Nonblocking file descriptor flag.
+pub const O_NONBLOCK: i32 = 0o4000;
+
 /// `open(2)` read-only flag.
 pub const O_RDONLY: i32 = 0;
 

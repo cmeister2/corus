@@ -321,6 +321,9 @@ fn is_device_path(name: &[u8]) -> bool {
 /// Reads mapping memory (indirectly, through the loopback pipe). Must run while
 /// the address space is stable (threads suspended), with `[start,end)` valid in
 /// this process's VM.
+/// `pagesize` must be the nonzero runtime kernel page size and fit in both
+/// `scratch` and the empty loopback pipe's capacity. The pipe must have both
+/// ends open and no other users for the duration of finalization.
 pub unsafe fn finalize_mappings(
     maps: &mut [Mapping],
     n: usize,

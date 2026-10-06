@@ -280,3 +280,39 @@ fn c_write_writes_full_buffer() {
         libc::close(fds[1]);
     }
 }
+
+#[test]
+fn leading_zeros_releases_consecutive_fault_slots() -> Result<(), Box<dyn std::error::Error>> {
+    let pagesize = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) })?;
+    let unreadable_pages = 20;
+    let size = pagesize * (unreadable_pages + 1);
+    let memory = unsafe {
+        libc::mmap(
+            core::ptr::null_mut(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    assert_ne!(memory, libc::MAP_FAILED);
+    unsafe { *(memory as *mut u8).add(pagesize * unreadable_pages) = 0x42 };
+    assert_eq!(
+        unsafe { libc::mprotect(memory, pagesize * unreadable_pages, libc::PROT_NONE) },
+        0
+    );
+    let pipe = Pipe::new().map_err(std::io::Error::from_raw_os_error)?;
+    let mut scratch = vec![0u8; pagesize];
+    let skipped = unsafe { leading_zeros(&pipe, memory.cast(), size, pagesize, &mut scratch) };
+    let flags = unsafe { libc::fcntl(pipe.read_fd(), libc::F_GETFL) };
+    assert_eq!(unsafe { libc::munmap(memory, size) }, 0);
+    assert_eq!(skipped, pagesize * unreadable_pages);
+    assert!(flags >= 0);
+    assert_eq!(
+        flags & libc::O_NONBLOCK,
+        0,
+        "probe cleanup must restore blocking reads"
+    );
+    Ok(())
+}
