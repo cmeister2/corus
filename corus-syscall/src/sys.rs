@@ -88,6 +88,30 @@ pub unsafe fn write(fd: c_int, buf: *const c_void, count: usize) -> SysResult {
     from_ret(unsafe { syscall3(nr::WRITE, fd as usize, buf as usize, count) })
 }
 
+/// Probe process memory with `write(2)` into a private pipe.
+///
+/// Unlike [`write()`], this operation permits unreadable pages. The address is
+/// passed directly to the kernel, without a Rust reference or userspace
+/// dereference. Linux reports `EFAULT` or a readable prefix as a short write.
+///
+/// # Errors
+/// Returns the kernel errno if the probe fails, including `EFAULT` for an
+/// unreadable source. A successful result is the number of bytes queued.
+///
+/// # Safety
+/// `buf` must describe a stable mapped address range of `count` bytes; its
+/// pages need not have read permission or immutable contents. Source bytes are
+/// copied only by the kernel, and concurrent changes produce a best-effort
+/// observation rather than a coherent snapshot. `fd` must be the write end of a private
+/// pipe with a live read end and no concurrent users. `count` must not exceed
+/// the pipe's available capacity. Before probing again, the caller must drain
+/// queued bytes and release any empty pipe buffers left by a fault. Never make
+/// a blocking read for bytes that were not reported as written.
+#[inline]
+pub unsafe fn write_memory_probe(fd: c_int, buf: *const c_void, count: usize) -> SysResult {
+    from_ret(unsafe { syscall3(nr::WRITE, fd as usize, buf as usize, count) })
+}
+
 /// `lseek(2)`.
 ///
 /// # Errors

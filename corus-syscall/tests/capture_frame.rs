@@ -120,16 +120,16 @@ fn capture_frame_maps_registers_to_slots() {
     // Every controlled register must land in its own slot. This is the crux:
     // a base-register clobber previously shifted x9..x28 down by one slot and
     // left regs[28] stale.
-    for n in 1..=28usize {
-        if n == 18 || n == 19 {
+    for (register_index, &register) in regs.iter().enumerate().take(29).skip(1) {
+        if register_index == 18 || register_index == 19 {
             continue; // x18 platform / x19 LLVM-reserved: not controlled.
         }
         assert_eq!(
-            regs[n],
-            BASE + n as u64,
-            "regs[{n}] should hold x{n} sentinel {:#x}, got {:#x}",
-            BASE + n as u64,
-            regs[n],
+            register,
+            BASE + register_index as u64,
+            "regs[{register_index}] should hold x{register_index} sentinel {:#x}, got {:#x}",
+            BASE + register_index as u64,
+            register,
         );
     }
 

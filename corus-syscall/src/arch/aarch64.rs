@@ -85,7 +85,13 @@ pub unsafe fn syscall2(n: usize, a1: usize, a2: usize) -> usize {
 /// Raw syscall with three arguments.
 ///
 /// # Safety
-/// See [`syscall0`]. Arguments must be valid for the given syscall.
+/// See [`syscall0`]. Arguments must obey the kernel interface, and the caller
+/// must preserve Rust's validity, aliasing, and synchronization rules for any
+/// Rust values produced or modified by the syscall. Opaque source-address
+/// probes form no Rust references: kernel reads may observe concurrent changes
+/// or reject inaccessible ranges as defined errors or short results, such as
+/// a `write(2)` memory probe returning `EFAULT`. Typed wrappers may impose
+/// stronger source-buffer requirements.
 #[inline]
 pub unsafe fn syscall3(n: usize, a1: usize, a2: usize, a3: usize) -> usize {
     let ret: usize;
