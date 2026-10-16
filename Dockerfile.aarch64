@@ -3,7 +3,7 @@
 # Provides an arm64 environment with the Rust toolchain, cargo-nextest, and the
 # native tools the project needs (gdb/readelf/gcore via elfutils + binutils, a C
 # compiler for the C-ABI sources). Built natively on an arm64 runner.
-FROM rust:1-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6
+FROM rust:1-bookworm@sha256:e12566d5abc17a0da741628782cdb504b68b8961f5bfcf677936bf3e8b32de29
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
